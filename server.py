@@ -1,12 +1,16 @@
 import eventlet
-eventlet.monkey_patch()
+# Dòng này đã đúng, phải là dòng đầu tiên sau import os/sys (nếu có)
+eventlet.monkey_patch() 
 
 import os, click, cloudinary, cloudinary.uploader, cloudinary.api
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_from_directory
-from flask.cli import with_appcontext
+# GIỮ NGUYÊN: Import with_appcontext
+from flask.cli import with_appcontext 
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import inspect, or_, not_
+# BỔ SUNG: Import func cho UPDATE trong rename_folder
+from sqlalchemy.sql import func 
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from flask_login import LoginManager, UserMixin, login_user, logout_user, current_user, login_required
@@ -16,7 +20,7 @@ import uuid
 import logging
 import requests
 import time
-import urllib.parse # BỔ SUNG: Import cho việc xử lý URL/params
+import urllib.parse 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -35,7 +39,8 @@ CLOUDINARY_USER_FILES_FOLDER = f"{CLOUDINARY_ROOT_FOLDER}/user_files"
 
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+# THAY ĐỔI: Sử dụng async_mode='eventlet' (để rõ ràng)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet') 
 
 online_users = {}
 
@@ -50,6 +55,10 @@ try:
 except Exception as e:
     logger.error(f"Error configuring Cloudinary: {e}")
 
+# ============================================================
+# MODELS (Giữ nguyên)
+# ============================================================
+
 def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -58,20 +67,41 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+# THAY ĐỔI: Hàm này phải được gọi trong app_context HOẶC request_context
 def create_activity_log(action, details=None, target_user_id=None):
     """Ghi log hoạt động của user."""
+    # Đảm bảo có context để truy cập db.session/current_user
     try:
-        log_entry = ActivityLog(
-            user_id=current_user.id if current_user.is_authenticated else None,
-            action=action,
-            details=details,
-            target_user_id=target_user_id
-        )
-        db.session.add(log_entry)
-        db.session.commit()
+        # Nếu không ở trong request context, dùng app_context, nhưng thường hàm này 
+        # được gọi từ trong route hoặc socketio handler (có context) nên không cần bọc.
+        # Tuy nhiên, để an toàn tuyệt đối khi gọi từ thread/greenlet khác:
+        if not hasattr(request, 'sid'): # Giả định không phải là request/socket context
+             with app.app_context():
+                log_entry = ActivityLog(
+                    user_id=current_user.id if current_user.is_authenticated else None,
+                    action=action,
+                    details=details,
+                    target_user_id=target_user_id
+                )
+                db.session.add(log_entry)
+                db.session.commit()
+        else: # Trong request/socket context
+            log_entry = ActivityLog(
+                user_id=current_user.id if current_user.is_authenticated else None,
+                action=action,
+                details=details,
+                target_user_id=target_user_id
+            )
+            db.session.add(log_entry)
+            db.session.commit()
+    except RuntimeError as e:
+         # KHẮC PHỤC LỖI CONTEXT: Đảm bảo hoạt động DB trong ngữ cảnh hợp lệ.
+        logger.error(f"Context error when creating activity log: {e}")
+        db.session.rollback()
     except Exception as e:
         logger.error(f"Error creating activity log: {e}")
         db.session.rollback()
+
 
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -81,8 +111,9 @@ class User(UserMixin, db.Model):
     avatar_url = db.Column(db.String(256), nullable=True)
 
     files = db.relationship('File', backref='owner', lazy=True, cascade="all, delete-orphan")
-    sent_messages = db.relationship('Message', foreign_keys='Message.sender_id', backref='sender_user', lazy=True, cascade="all, delete-orphan")
-    received_messages = db.relationship('Message', foreign_keys='Message.recipient_id', backref='recipient_user', lazy=True, cascade="all, delete-orphan")
+    # KHẮC PHỤC SAWarning: Bổ sung back_populates hoặc overlaps
+    sent_messages = db.relationship('Message', foreign_keys='Message.sender_id', backref='sender_user', lazy=True, cascade="all, delete-orphan", overlaps="sender,sender_user")
+    received_messages = db.relationship('Message', foreign_keys='Message.recipient_id', backref='recipient_user', lazy=True, cascade="all, delete-orphan", overlaps="recipient,recipient_user")
     activity_logs = db.relationship('ActivityLog', foreign_keys='ActivityLog.user_id', backref='user', lazy=True, cascade="all, delete-orphan")
     file_accesses = db.relationship('FileAccessLog', backref='user', lazy=True, cascade="all, delete-orphan")
     
@@ -90,8 +121,7 @@ class User(UserMixin, db.Model):
         self.password_hash = generate_password_hash(password)
     
     def check_password(self, password):
-        # KHẮC PHỤC: Sử dụng check_password_hash với tham số đúng thứ tự
-        return check_password_hash(password, self.password_hash)
+        return check_password_hash(self.password_hash, password) # Sửa thứ tự tham số nếu cần, nhưng `werkzeug` thường là `check_password_hash(p_hash, p_input)`
 
 class File(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -100,8 +130,8 @@ class File(db.Model):
     resource_type = db.Column(db.String(50), nullable=False, default='raw')
     user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
     upload_date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
-    last_opened_by = db.Column(db.String(80), nullable=True) # BỔ SUNG
-    last_opened_at = db.Column(db.DateTime, nullable=True) # BỔ SUNG
+    last_opened_by = db.Column(db.String(80), nullable=True) 
+    last_opened_at = db.Column(db.DateTime, nullable=True) 
     
     access_logs = db.relationship('FileAccessLog', backref='file', lazy=True, cascade="all, delete-orphan")
 
@@ -113,8 +143,9 @@ class Message(db.Model):
     recipient_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
     is_read = db.Column(db.Boolean, default=False, nullable=False)
     
-    sender = db.relationship('User', foreign_keys=[sender_id])
-    recipient = db.relationship('User', foreign_keys=[recipient_id])
+    # KHẮC PHỤC SAWarning: Sử dụng back_populates để liên kết rõ ràng
+    sender = db.relationship('User', foreign_keys=[sender_id], back_populates='sent_messages') 
+    recipient = db.relationship('User', foreign_keys=[recipient_id], back_populates='received_messages')
 
 class AppVersion(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -138,16 +169,22 @@ class FileAccessLog(db.Model):
     file_id = db.Column(db.Integer, db.ForeignKey('file.id', ondelete='CASCADE'), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
     opened_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    
+# ============================================================
+# CONFIG & INITIALIZATION (Đã sửa lỗi context)
+# ============================================================
 
 @login_manager.user_loader
 def load_user(user_id):
-    return User.query.get(int(user_id))
+    # KHẮC PHỤC: Sử dụng app_context nếu cần, nhưng load_user thường được gọi trong request context
+    # Đã bọc các thao tác DB trong context
+    with app.app_context():
+        return User.query.get(int(user_id))
 
 def initialize_database(app, db):
     """Khởi tạo database và tạo admin user nếu cần."""
-    with app.app_context():
+    with app.app_context(): # BẮT BUỘC: Đảm bảo chạy trong application context
         try:
-            # db.create_all() sẽ tạo các bảng thiếu và cập nhật cấu trúc bảng (nếu không có Flask-Migrate)
             db.create_all() 
             logger.info("Database tables created successfully (or checked).")
         except Exception as e:
@@ -166,17 +203,17 @@ def initialize_database(app, db):
 
 # Gắn lệnh CLI để Render có thể chạy setup trước khi Gunicorn chạy chính
 @app.cli.command("init-db")
-@with_appcontext
+@with_appcontext # BẮT BUỘC: Đảm bảo lệnh CLI chạy trong app context
 def init_db_command():
-    """Khởi tạo database và admin user cho Render Build Hook."""
+    """Khởi tạo database và admin user cho Render Build Hook/Start Command."""
     initialize_database(app, db)
     click.echo('Database initialized/checked.')
 
 # ============================================================
-# LOGIC KEEP ALIVE (Đã sửa lỗi context)
+# LOGIC KEEP ALIVE (Sử dụng Eventlet)
 # ============================================================
 SELF_PING_URL = os.environ.get('SELF_PING_URL')
-keep_alive_started = False # Biến cờ
+keep_alive_started = False 
 
 def ping_self():
     """Thực hiện ping server định kỳ để ngăn Render ngủ đông."""
@@ -186,7 +223,8 @@ def ping_self():
         eventlet.sleep(PING_INTERVAL_SECONDS)
         
         try:
-            requests.get(SELF_PING_URL, timeout=10)
+            # requests đã được monkey-patch nên sẽ không blocking mainloop
+            requests.get(SELF_PING_URL, timeout=10) 
             logger.info(f"[KEEP-ALIVE] Ping thành công lúc: {datetime.now(timezone.utc)}")
         except Exception as e:
             logger.error(f"[KEEP-ALIVE ERROR]: Không thể ping URL {SELF_PING_URL}: {e}")
@@ -195,7 +233,10 @@ def start_keep_alive_thread():
     """Khởi tạo luồng ping nếu biến môi trường được đặt."""
     if SELF_PING_URL:
         logger.info(f"Bắt đầu luồng Keep-Alive cho URL: {SELF_PING_URL}")
-        eventlet.spawn(ping_self) 
+        eventlet.spawn(ping_self) # Sử dụng eventlet.spawn để chạy greenlet
+
+# ============================================================
+# ROUTES (Giữ nguyên các route, chúng đã chạy trong request context)
 # ============================================================
 
 @app.route('/update', methods=['GET'])
@@ -380,7 +421,6 @@ def upload_file():
     if 'file' not in request.files:
         return jsonify({'message': 'Không tìm thấy file.'}), 400
     
-    # BỔ SUNG: Lấy tên thư mục
     target_folder_name = request.form.get('target_folder', 'Gốc')
     
     file = request.files['file']
@@ -392,12 +432,10 @@ def upload_file():
         file_base_name, file_extension = os.path.splitext(original_filename)
         safe_filename_part = secure_filename(file_base_name)
         
-        # Xây dựng đường dẫn Cloudinary Public ID
         folder_path = CLOUDINARY_USER_FILES_FOLDER
-        # Nếu thư mục đích không phải 'Gốc' hoặc 'Gốc (/)', thêm nó vào đường dẫn
         if target_folder_name and target_folder_name != 'Gốc' and target_folder_name != 'Gốc (/)':
-             clean_folder_name = target_folder_name.strip('/')
-             folder_path = f"{CLOUDINARY_USER_FILES_FOLDER}/{clean_folder_name}"
+            clean_folder_name = target_folder_name.strip('/')
+            folder_path = f"{CLOUDINARY_USER_FILES_FOLDER}/{clean_folder_name}"
         
         public_id_base = f"{folder_path}/{safe_filename_part}_{uuid.uuid4().hex[:6]}"
         
@@ -419,7 +457,6 @@ def upload_file():
 @login_required
 def get_files():
     try:
-        # BỔ SUNG: Hỗ trợ tìm kiếm theo tên file
         search_term = request.args.get('search', '').strip()
         
         files_to_exclude = AppVersion.query.with_entities(AppVersion.public_id).all()
@@ -431,7 +468,6 @@ def get_files():
             not_(File.public_id.in_(files_to_exclude_list))
         )
         
-        # Áp dụng tìm kiếm
         if search_term:
             files_query = files_query.filter(File.filename.ilike(f'%{search_term}%'))
 
@@ -441,7 +477,6 @@ def get_files():
         for f in files:
             uploaded_by_username = f.owner.username if f.owner else "Người dùng đã bị xóa"
             
-            # Trích xuất tên thư mục từ public_id
             full_folder_prefix = f"{CLOUDINARY_USER_FILES_FOLDER}/"
             folder_name = 'Gốc'
             if full_folder_prefix in f.public_id:
@@ -455,7 +490,7 @@ def get_files():
                 'uploaded_by': uploaded_by_username,
                 'last_opened_by': f.last_opened_by,
                 'last_opened_at': f.last_opened_at.isoformat() if f.last_opened_at else None,
-                'folder': folder_name # BỔ SUNG: Tên thư mục
+                'folder': folder_name 
             })
         return jsonify({'files': file_list})
     except Exception as e:
@@ -569,14 +604,13 @@ def get_cloudinary_folder_path(folder_name):
     return f"{CLOUDINARY_USER_FILES_FOLDER}/{clean_folder_name}"
 
 # ============================================================
-# BỔ SUNG: ADMIN - QUẢN LÝ THƯ MỤC CLOUDINARY (Đã sửa lỗi sub_folders)
+# ADMIN - QUẢN LÝ THƯ MỤC CLOUDINARY
 # ============================================================
 @app.route('/admin/folders', methods=['GET'])
 @admin_required
 def admin_get_folders():
     """Lấy danh sách thư mục con trong CLOUDINARY_USER_FILES_FOLDER."""
     try:
-        # ĐÃ SỬA: Thay thế sub_folders bằng folders để tương thích với Cloudinary SDK
         folders_response = cloudinary.api.folders(CLOUDINARY_USER_FILES_FOLDER)
         
         folders = [f['name'] for f in folders_response.get('folders', [])]
@@ -627,7 +661,7 @@ def admin_rename_folder():
         
         # Cập nhật public_id trong DB
         db.session.query(File).filter(File.public_id.like(f'{old_public_id_prefix}%')).update(
-            {File.public_id: db.sql.func.replace(File.public_id, old_public_id_prefix, new_public_id_prefix)}, 
+            {File.public_id: func.replace(File.public_id, old_public_id_prefix, new_public_id_prefix)}, 
             synchronize_session=False
         )
         db.session.commit()
@@ -835,15 +869,18 @@ def handle_connect():
         online_users[user_id] = request.sid
         logger.info(f"User {current_user.username} connected (SID: {request.sid})")
         emit('user_connected', user_data, broadcast=True, include_self=False)
-        unread_messages = (db.session.query(Message.sender_id).filter(Message.recipient_id == current_user.id, Message.is_read == False).group_by(Message.sender_id).all())
-        counts_dict = {}
-        for sender_id, in unread_messages:
-            sender = User.query.get(sender_id)
-            if sender:
-                count = Message.query.filter_by(sender_id=sender_id, recipient_id=current_user.id, is_read=False).count()
-                counts_dict[sender.username] = count
-        if counts_dict:
-            emit('offline_notifications', {'counts': counts_dict}, room=request.sid)
+        
+        # BỌC TRUY VẤN DB TRONG SOCKETIO HANDLER
+        with app.app_context():
+            unread_messages = (db.session.query(Message.sender_id).filter(Message.recipient_id == current_user.id, Message.is_read == False).group_by(Message.sender_id).all())
+            counts_dict = {}
+            for sender_id, in unread_messages:
+                sender = User.query.get(sender_id)
+                if sender:
+                    count = Message.query.filter_by(sender_id=sender_id, recipient_id=current_user.id, is_read=False).count()
+                    counts_dict[sender.username] = count
+            if counts_dict:
+                emit('offline_notifications', {'counts': counts_dict}, room=request.sid)
 
 @socketio.on('disconnect')
 def handle_disconnect():
