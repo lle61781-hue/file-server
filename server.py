@@ -28,18 +28,19 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'a-fallback-secret-key-for-development')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL') or 'sqlite:///' + os.path.join(basedir, 'app.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['MAX_CONTENT_LENGTH'] = 256 * 1024 * 1024
-
-CLOUDINARY_ROOT_FOLDER = "pyside_chat_app"
-CLOUDINARY_UPDATE_FOLDER = f"{CLOUDINARY_ROOT_FOLDER}/updates"
-CLOUDINARY_AVATAR_FOLDER = f"{CLOUDINARY_ROOT_FOLDER}/avatars"
-CLOUDINARY_USER_FILES_FOLDER = f"{CLOUDINARY_ROOT_FOLDER}/user_files"
+# Tăng giới hạn tải lên của Flask lên 256MB (giải pháp cho file lớn)
+app.config['MAX_CONTENT_LENGTH'] = 256 * 1024 * 1024 
 
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet') 
 
 online_users = {}
+
+CLOUDINARY_ROOT_FOLDER = "pyside_chat_app"
+CLOUDINARY_UPDATE_FOLDER = f"{CLOUDINARY_ROOT_FOLDER}/updates"
+CLOUDINARY_AVATAR_FOLDER = f"{CLOUDINARY_ROOT_FOLDER}/avatars"
+CLOUDINARY_USER_FILES_FOLDER = f"{CLOUDINARY_ROOT_FOLDER}/user_files"
 
 try:
     cloudinary.config(
@@ -64,13 +65,11 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# BỌC hàm này trong try/except hoặc bối cảnh app/request khi gọi
 def create_activity_log(action, details=None, target_user_id=None):
     """Ghi log hoạt động của user."""
     try:
-        # Sử dụng app_context nếu không chắc chắn đang ở trong request context
+        # BỌC trong app_context để tránh NameError/RuntimeError khi gọi từ greenlet/socketio
         with app.app_context():
-            # Sử dụng current_user từ Flask-Login (cần request context) hoặc kiểm tra
             user_id = current_user.id if current_user.is_authenticated else None
             
             log_entry = ActivityLog(
@@ -188,29 +187,34 @@ def init_db_command():
     click.echo('Database initialized/checked.')
 
 # ============================================================
-# LOGIC KEEP ALIVE 
+# LOGIC KEEP ALIVE (SỬA LỖI NAMEERROR/CONTEXT)
 # ============================================================
 SELF_PING_URL = os.environ.get('SELF_PING_URL')
 keep_alive_started = False 
 
 def ping_self():
     """Thực hiện ping server định kỳ để ngăn Render ngủ đông."""
+    # Render miễn phí idle sau 15 phút, ping mỗi 14 phút
     PING_INTERVAL_SECONDS = 840 
     
     while True:
         eventlet.sleep(PING_INTERVAL_SECONDS)
         
         try:
-            requests.get(SELF_PING_URL, timeout=10) 
-            logger.info(f"[KEEP-ALIVE] Ping thành công lúc: {datetime.now(timezone.utc)}")
+            # BỌC REQUESTS TRONG CONTEXT để tránh lỗi khi các modules bị vá
+            with app.app_context():
+                requests.get(SELF_PING_URL, timeout=10) 
+                logger.info(f"[KEEP-ALIVE] Ping thành công lúc: {datetime.now(timezone.utc)}")
         except Exception as e:
             logger.error(f"[KEEP-ALIVE ERROR]: Không thể ping URL {SELF_PING_URL}: {e}")
 
 def start_keep_alive_thread():
     """Khởi tạo luồng ping nếu biến môi trường được đặt."""
-    if SELF_PING_URL:
+    global keep_alive_started
+    if SELF_PING_URL and not keep_alive_started:
         logger.info(f"Bắt đầu luồng Keep-Alive cho URL: {SELF_PING_URL}")
         eventlet.spawn(ping_self) 
+        keep_alive_started = True
 
 # ============================================================
 # UTILS MỚI CHO LOGIC THƯ MỤC
@@ -229,7 +233,6 @@ def get_folder_name_from_public_id(public_id):
     folder_name = 'Gốc'
     if public_id.startswith(full_folder_prefix):
         folder_path_raw = public_id.split(full_folder_prefix, 1)[-1]
-        # Lấy phần đầu tiên của path nếu có dấu '/' (tức là tên thư mục)
         if '/' in folder_path_raw:
             folder_name = folder_path_raw.rsplit('/', 1)[0]
     return folder_name
@@ -279,14 +282,9 @@ def upload_update():
 
 @app.route('/')
 def index():
-    global keep_alive_started
     logger.info("Health check received on /.")
-    
-    if not keep_alive_started:
-        start_keep_alive_thread()
-        keep_alive_started = True
-        logger.info("Keep-Alive thread initialized successfully.")
-        
+    # Đảm bảo Keep-Alive được khởi động NGAY SAU khi nhận request đầu tiên
+    start_keep_alive_thread()
     return "Backend server for the application is running!"
 
 @app.route('/login', methods=['POST'])
@@ -524,12 +522,9 @@ def get_files_in_folder():
                  continue
                  
             # Lấy phần tên file/thư mục con sau tiền tố hiện tại
-            # Ví dụ: public_id_prefix = pyside_chat_app/user_files/TaiLieu
-            # f.public_id = pyside_chat_app/user_files/TaiLieu/BaoCao.docx_abc123
             relative_path = f.public_id.split(f'{public_id_prefix}/', 1)[-1]
             
             # Nếu relative_path chứa dấu '/', tức là nó là file trong thư mục con, BỎ QUA
-            # Chúng ta chỉ muốn file nằm trực tiếp trong thư mục hiện tại.
             if '/' in relative_path:
                  continue
 
@@ -949,7 +944,6 @@ def handle_disconnect():
             del online_users[user_id]
             logger.info(f"User {username} disconnected")
             emit('user_disconnected', {'id': user_id, 'username': username}, broadcast=True, include_self=False)
-        # BỌC create_activity_log trong app_context
         with app.app_context():
              create_activity_log('LOGOUT', 'Ngắt kết nối')
 
@@ -989,8 +983,6 @@ def handle_stop_typing(data):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000)) 
     
-    # Giữ nguyên khối này nếu bạn chạy local
     initialize_database(app, db) 
     
     socketio.run(app, host='0.0.0.0', port=port)
-
