@@ -28,7 +28,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'a-fallback-secret-key-for-development')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL') or 'sqlite:///' + os.path.join(basedir, 'app.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 256 * 1024 * 1024
 
 CLOUDINARY_ROOT_FOLDER = "pyside_chat_app"
 CLOUDINARY_UPDATE_FOLDER = f"{CLOUDINARY_ROOT_FOLDER}/updates"
@@ -993,3 +993,4 @@ if __name__ == '__main__':
     initialize_database(app, db) 
     
     socketio.run(app, host='0.0.0.0', port=port)
+
