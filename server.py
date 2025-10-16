@@ -611,15 +611,18 @@ def get_cloudinary_folder_path(folder_name):
 def admin_get_folders():
     """Lấy danh sách thư mục con trong CLOUDINARY_USER_FILES_FOLDER."""
     try:
-        folders_response = cloudinary.api.folders(CLOUDINARY_USER_FILES_FOLDER)
+        # SỬA: Sử dụng subfolders để lấy tất cả thư mục con, kể cả thư mục rỗng
+        folders_response = cloudinary.api.subfolders(CLOUDINARY_USER_FILES_FOLDER)
         
         folders = [f['name'] for f in folders_response.get('folders', [])]
         
+        # Thêm thư mục gốc
         folders.insert(0, 'Gốc (/)') 
         
         return jsonify({'folders': folders})
     except Exception as e:
         logger.error(f"Error accessing /admin/folders GET: {e}")
+        # Trả về ít nhất thư mục gốc nếu có lỗi
         return jsonify({'folders': ['Gốc (/)']}), 200
 
 @app.route('/admin/folders', methods=['POST'])
@@ -635,6 +638,10 @@ def admin_create_folder():
     try:
         cloudinary.api.create_folder(full_path)
         create_activity_log('CREATE_FOLDER', f'Tạo thư mục: {folder_name}')
+        
+        # THÊM: Gửi socket event để thông báo cho tất cả client
+        socketio.emit('folders_updated', namespace='/chat')
+        
         return jsonify({'message': f"Đã tạo thư mục '{folder_name}' thành công!"}), 201
     except Exception as e:
         logger.error(f"Error creating folder: {e}")
@@ -666,6 +673,9 @@ def admin_rename_folder():
         )
         db.session.commit()
         
+        # THÊM: Gửi socket event để thông báo cho tất cả client
+        socketio.emit('folders_updated', namespace='/chat')
+        
         return jsonify({'message': f"Đã đổi tên thư mục từ '{old_name}' thành '{new_name}' thành công!"}), 200
     except Exception as e:
         logger.error(f"Error renaming folder: {e}")
@@ -694,6 +704,10 @@ def admin_delete_folder():
         cloudinary.api.delete_folder(full_path, force_delete=True) 
         
         create_activity_log('DELETE_FOLDER', f'Xóa thư mục: {folder_name}')
+        
+        # THÊM: Gửi socket event để thông báo cho tất cả client
+        socketio.emit('folders_updated', namespace='/chat')
+        
         return jsonify({'message': f"Đã xóa thư mục '{folder_name}' và toàn bộ nội dung thành công!"}), 200
     except Exception as e:
         logger.error(f"Error deleting folder: {e}")
