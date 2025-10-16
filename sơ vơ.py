@@ -1,15 +1,13 @@
 import eventlet
-# Dòng này đã đúng, phải là dòng đầu tiên sau import os/sys (nếu có)
+# Dòng này phải là dòng đầu tiên sau import os/sys (nếu có)
 eventlet.monkey_patch() 
 
 import os, click, cloudinary, cloudinary.uploader, cloudinary.api
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_from_directory
-# GIỮ NGUYÊN: Import with_appcontext
 from flask.cli import with_appcontext 
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import inspect, or_, not_
-# BỔ SUNG: Import func cho UPDATE trong rename_folder
 from sqlalchemy.sql import func 
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
@@ -30,7 +28,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'a-fallback-secret-key-for-development')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL') or 'sqlite:///' + os.path.join(basedir, 'app.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 256 * 1024 * 1024
 
 CLOUDINARY_ROOT_FOLDER = "pyside_chat_app"
 CLOUDINARY_UPDATE_FOLDER = f"{CLOUDINARY_ROOT_FOLDER}/updates"
@@ -39,7 +37,6 @@ CLOUDINARY_USER_FILES_FOLDER = f"{CLOUDINARY_ROOT_FOLDER}/user_files"
 
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
-# THAY ĐỔI: Sử dụng async_mode='eventlet' (để rõ ràng)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet') 
 
 online_users = {}
@@ -56,7 +53,7 @@ except Exception as e:
     logger.error(f"Error configuring Cloudinary: {e}")
 
 # ============================================================
-# MODELS (Giữ nguyên)
+# MODELS
 # ============================================================
 
 def admin_required(f):
@@ -67,37 +64,23 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# THAY ĐỔI: Hàm này phải được gọi trong app_context HOẶC request_context
+# BỌC hàm này trong try/except hoặc bối cảnh app/request khi gọi
 def create_activity_log(action, details=None, target_user_id=None):
     """Ghi log hoạt động của user."""
-    # Đảm bảo có context để truy cập db.session/current_user
     try:
-        # Nếu không ở trong request context, dùng app_context, nhưng thường hàm này 
-        # được gọi từ trong route hoặc socketio handler (có context) nên không cần bọc.
-        # Tuy nhiên, để an toàn tuyệt đối khi gọi từ thread/greenlet khác:
-        if not hasattr(request, 'sid'): # Giả định không phải là request/socket context
-             with app.app_context():
-                log_entry = ActivityLog(
-                    user_id=current_user.id if current_user.is_authenticated else None,
-                    action=action,
-                    details=details,
-                    target_user_id=target_user_id
-                )
-                db.session.add(log_entry)
-                db.session.commit()
-        else: # Trong request/socket context
+        # Sử dụng app_context nếu không chắc chắn đang ở trong request context
+        with app.app_context():
+            # Sử dụng current_user từ Flask-Login (cần request context) hoặc kiểm tra
+            user_id = current_user.id if current_user.is_authenticated else None
+            
             log_entry = ActivityLog(
-                user_id=current_user.id if current_user.is_authenticated else None,
+                user_id=user_id,
                 action=action,
                 details=details,
                 target_user_id=target_user_id
             )
             db.session.add(log_entry)
             db.session.commit()
-    except RuntimeError as e:
-         # KHẮC PHỤC LỖI CONTEXT: Đảm bảo hoạt động DB trong ngữ cảnh hợp lệ.
-        logger.error(f"Context error when creating activity log: {e}")
-        db.session.rollback()
     except Exception as e:
         logger.error(f"Error creating activity log: {e}")
         db.session.rollback()
@@ -111,7 +94,6 @@ class User(UserMixin, db.Model):
     avatar_url = db.Column(db.String(256), nullable=True)
 
     files = db.relationship('File', backref='owner', lazy=True, cascade="all, delete-orphan")
-    # KHẮC PHỤC SAWarning: Bổ sung back_populates hoặc overlaps
     sent_messages = db.relationship('Message', foreign_keys='Message.sender_id', backref='sender_user', lazy=True, cascade="all, delete-orphan", overlaps="sender,sender_user")
     received_messages = db.relationship('Message', foreign_keys='Message.recipient_id', backref='recipient_user', lazy=True, cascade="all, delete-orphan", overlaps="recipient,recipient_user")
     activity_logs = db.relationship('ActivityLog', foreign_keys='ActivityLog.user_id', backref='user', lazy=True, cascade="all, delete-orphan")
@@ -121,7 +103,7 @@ class User(UserMixin, db.Model):
         self.password_hash = generate_password_hash(password)
     
     def check_password(self, password):
-        return check_password_hash(self.password_hash, password) # Sửa thứ tự tham số nếu cần, nhưng `werkzeug` thường là `check_password_hash(p_hash, p_input)`
+        return check_password_hash(self.password_hash, password) 
 
 class File(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -143,7 +125,6 @@ class Message(db.Model):
     recipient_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
     is_read = db.Column(db.Boolean, default=False, nullable=False)
     
-    # KHẮC PHỤC SAWarning: Sử dụng back_populates để liên kết rõ ràng
     sender = db.relationship('User', foreign_keys=[sender_id], back_populates='sent_messages') 
     recipient = db.relationship('User', foreign_keys=[recipient_id], back_populates='received_messages')
 
@@ -171,19 +152,17 @@ class FileAccessLog(db.Model):
     opened_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     
 # ============================================================
-# CONFIG & INITIALIZATION (Đã sửa lỗi context)
+# CONFIG & INITIALIZATION
 # ============================================================
 
 @login_manager.user_loader
 def load_user(user_id):
-    # KHẮC PHỤC: Sử dụng app_context nếu cần, nhưng load_user thường được gọi trong request context
-    # Đã bọc các thao tác DB trong context
     with app.app_context():
         return User.query.get(int(user_id))
 
 def initialize_database(app, db):
     """Khởi tạo database và tạo admin user nếu cần."""
-    with app.app_context(): # BẮT BUỘC: Đảm bảo chạy trong application context
+    with app.app_context(): 
         try:
             db.create_all() 
             logger.info("Database tables created successfully (or checked).")
@@ -201,16 +180,15 @@ def initialize_database(app, db):
                 db.session.commit()
                 logger.info(f"Default admin user '{admin_user}' created.")
 
-# Gắn lệnh CLI để Render có thể chạy setup trước khi Gunicorn chạy chính
 @app.cli.command("init-db")
-@with_appcontext # BẮT BUỘC: Đảm bảo lệnh CLI chạy trong app context
+@with_appcontext 
 def init_db_command():
     """Khởi tạo database và admin user cho Render Build Hook/Start Command."""
     initialize_database(app, db)
     click.echo('Database initialized/checked.')
 
 # ============================================================
-# LOGIC KEEP ALIVE (Sử dụng Eventlet)
+# LOGIC KEEP ALIVE 
 # ============================================================
 SELF_PING_URL = os.environ.get('SELF_PING_URL')
 keep_alive_started = False 
@@ -223,7 +201,6 @@ def ping_self():
         eventlet.sleep(PING_INTERVAL_SECONDS)
         
         try:
-            # requests đã được monkey-patch nên sẽ không blocking mainloop
             requests.get(SELF_PING_URL, timeout=10) 
             logger.info(f"[KEEP-ALIVE] Ping thành công lúc: {datetime.now(timezone.utc)}")
         except Exception as e:
@@ -233,10 +210,33 @@ def start_keep_alive_thread():
     """Khởi tạo luồng ping nếu biến môi trường được đặt."""
     if SELF_PING_URL:
         logger.info(f"Bắt đầu luồng Keep-Alive cho URL: {SELF_PING_URL}")
-        eventlet.spawn(ping_self) # Sử dụng eventlet.spawn để chạy greenlet
+        eventlet.spawn(ping_self) 
 
 # ============================================================
-# ROUTES (Giữ nguyên các route, chúng đã chạy trong request context)
+# UTILS MỚI CHO LOGIC THƯ MỤC
+# ============================================================
+def get_cloudinary_folder_path(folder_name):
+    """Trả về đường dẫn Cloudinary đầy đủ hoặc thư mục gốc."""
+    if folder_name == 'Gốc' or folder_name == 'Gốc (/)':
+        return CLOUDINARY_USER_FILES_FOLDER
+    clean_folder_name = folder_name.strip('/') 
+    clean_folder_name = secure_filename(clean_folder_name)
+    return f"{CLOUDINARY_USER_FILES_FOLDER}/{clean_folder_name}"
+
+def get_folder_name_from_public_id(public_id):
+    """Trích xuất tên thư mục từ public_id."""
+    full_folder_prefix = f"{CLOUDINARY_USER_FILES_FOLDER}/"
+    folder_name = 'Gốc'
+    if public_id.startswith(full_folder_prefix):
+        folder_path_raw = public_id.split(full_folder_prefix, 1)[-1]
+        # Lấy phần đầu tiên của path nếu có dấu '/' (tức là tên thư mục)
+        if '/' in folder_path_raw:
+            folder_name = folder_path_raw.rsplit('/', 1)[0]
+    return folder_name
+# ============================================================
+
+# ============================================================
+# ROUTES
 # ============================================================
 
 @app.route('/update', methods=['GET'])
@@ -282,7 +282,6 @@ def index():
     global keep_alive_started
     logger.info("Health check received on /.")
     
-    # KHẮC PHỤC LỖI CONTEXT: Chỉ khởi động Keep-Alive khi ứng dụng đã load xong
     if not keep_alive_started:
         start_keep_alive_thread()
         keep_alive_started = True
@@ -432,10 +431,7 @@ def upload_file():
         file_base_name, file_extension = os.path.splitext(original_filename)
         safe_filename_part = secure_filename(file_base_name)
         
-        folder_path = CLOUDINARY_USER_FILES_FOLDER
-        if target_folder_name and target_folder_name != 'Gốc' and target_folder_name != 'Gốc (/)':
-            clean_folder_name = target_folder_name.strip('/')
-            folder_path = f"{CLOUDINARY_USER_FILES_FOLDER}/{clean_folder_name}"
+        folder_path = get_cloudinary_folder_path(target_folder_name)
         
         public_id_base = f"{folder_path}/{safe_filename_part}_{uuid.uuid4().hex[:6]}"
         
@@ -456,6 +452,7 @@ def upload_file():
 @app.route('/files', methods=['GET'])
 @login_required
 def get_files():
+    """Endpoint cũ, chỉ dùng để tương thích ngược nếu cần."""
     try:
         search_term = request.args.get('search', '').strip()
         
@@ -477,12 +474,7 @@ def get_files():
         for f in files:
             uploaded_by_username = f.owner.username if f.owner else "Người dùng đã bị xóa"
             
-            full_folder_prefix = f"{CLOUDINARY_USER_FILES_FOLDER}/"
-            folder_name = 'Gốc'
-            if full_folder_prefix in f.public_id:
-                folder_path_raw = f.public_id.split(full_folder_prefix, 1)[-1]
-                if '/' in folder_path_raw:
-                    folder_name = folder_path_raw.rsplit('/', 1)[0]
+            folder_name = get_folder_name_from_public_id(f.public_id)
                 
             file_list.append({
                 'filename': f.filename,
@@ -496,6 +488,73 @@ def get_files():
     except Exception as e:
         logger.error(f"Error accessing /files: {e}")
         return jsonify({'message': 'Internal Server Error'}), 500
+
+# ============================================================
+# ENDPOINT MỚI: /files/in-folder
+# ============================================================
+@app.route('/files/in-folder', methods=['GET'])
+@login_required
+def get_files_in_folder():
+    """Trả về danh sách file trong thư mục cụ thể."""
+    try:
+        # Giải mã tên thư mục (ví dụ: G%E1%BB%91c -> Gốc)
+        folder_name_encoded = request.args.get('folder', 'Gốc')
+        folder_name = urllib.parse.unquote(folder_name_encoded).strip()
+        search_term = request.args.get('search', '').strip()
+        
+        public_id_prefix = get_cloudinary_folder_path(folder_name)
+        
+        # 1. Xây dựng truy vấn cơ sở
+        files_to_exclude = AppVersion.query.with_entities(AppVersion.public_id).all()
+        files_to_exclude_list = [f[0] for f in files_to_exclude]
+        
+        files_query = File.query.filter(
+            File.public_id.like(f'{public_id_prefix}/%'),
+            not_(File.public_id.like(f'{CLOUDINARY_AVATAR_FOLDER}/%')),
+            not_(File.public_id.in_(files_to_exclude_list))
+        )
+        
+        all_files_in_prefix = files_query.all()
+        file_list = []
+
+        # 2. Lọc chính xác file CHỈ nằm trong thư mục hiện tại (không phải thư mục con)
+        for f in all_files_in_prefix:
+            
+            if not f.public_id.startswith(f'{public_id_prefix}/'):
+                 continue
+                 
+            # Lấy phần tên file/thư mục con sau tiền tố hiện tại
+            # Ví dụ: public_id_prefix = pyside_chat_app/user_files/TaiLieu
+            # f.public_id = pyside_chat_app/user_files/TaiLieu/BaoCao.docx_abc123
+            relative_path = f.public_id.split(f'{public_id_prefix}/', 1)[-1]
+            
+            # Nếu relative_path chứa dấu '/', tức là nó là file trong thư mục con, BỎ QUA
+            # Chúng ta chỉ muốn file nằm trực tiếp trong thư mục hiện tại.
+            if '/' in relative_path:
+                 continue
+
+            # Áp dụng tìm kiếm nếu có
+            if search_term and search_term.lower() not in f.filename.lower():
+                continue
+            
+            uploaded_by_username = f.owner.username if f.owner else "Người dùng đã bị xóa"
+            
+            file_list.append({
+                'filename': f.filename,
+                'public_id': f.public_id,
+                'uploaded_by': uploaded_by_username,
+                'last_opened_by': f.last_opened_by,
+                'last_opened_at': f.last_opened_at.isoformat() if f.last_opened_at else None,
+                'folder': folder_name
+            })
+                
+        return jsonify({'files': file_list})
+        
+    except Exception as e:
+        logger.error(f"Error accessing /files/in-folder: {e}")
+        return jsonify({'message': f'Internal Server Error: {e}'}), 500
+# ============================================================
+
 
 @app.route('/download', methods=['POST'])
 @login_required
@@ -596,13 +655,6 @@ def admin_delete_log(log_id):
         return jsonify({'message': 'Lỗi server khi xóa log đơn lẻ.'}), 500
 # ============================================================
 
-def get_cloudinary_folder_path(folder_name):
-    """Trả về đường dẫn Cloudinary đầy đủ hoặc thư mục gốc."""
-    if folder_name == 'Gốc' or folder_name == 'Gốc (/)':
-        return CLOUDINARY_USER_FILES_FOLDER
-    clean_folder_name = folder_name.strip('/') 
-    return f"{CLOUDINARY_USER_FILES_FOLDER}/{clean_folder_name}"
-
 # ============================================================
 # ADMIN - QUẢN LÝ THƯ MỤC CLOUDINARY
 # ============================================================
@@ -611,26 +663,23 @@ def get_cloudinary_folder_path(folder_name):
 def admin_get_folders():
     """Lấy danh sách thư mục con trong CLOUDINARY_USER_FILES_FOLDER."""
     try:
-        # SỬA: Sử dụng subfolders để lấy tất cả thư mục con, kể cả thư mục rỗng
         folders_response = cloudinary.api.subfolders(CLOUDINARY_USER_FILES_FOLDER)
         
         folders = [f['name'] for f in folders_response.get('folders', [])]
         
-        # Thêm thư mục gốc
-        folders.insert(0, 'Gốc (/)') 
+        folders.insert(0, 'Gốc')
         
         return jsonify({'folders': folders})
     except Exception as e:
         logger.error(f"Error accessing /admin/folders GET: {e}")
-        # Trả về ít nhất thư mục gốc nếu có lỗi
-        return jsonify({'folders': ['Gốc (/)']}), 200
+        return jsonify({'folders': ['Gốc']}), 200
 
 @app.route('/admin/folders', methods=['POST'])
 @admin_required
 def admin_create_folder():
     data = request.get_json()
     folder_name = data.get('folder_name')
-    if not folder_name or folder_name == 'Gốc (/)':
+    if not folder_name or folder_name == 'Gốc' or folder_name == 'Gốc (/)':
         return jsonify({'message': 'Thiếu tên thư mục hoặc tên không hợp lệ.'}), 400
     
     full_path = get_cloudinary_folder_path(folder_name)
@@ -639,8 +688,7 @@ def admin_create_folder():
         cloudinary.api.create_folder(full_path)
         create_activity_log('CREATE_FOLDER', f'Tạo thư mục: {folder_name}')
         
-        # THÊM: Gửi socket event để thông báo cho tất cả client
-        socketio.emit('folders_updated', namespace='/chat')
+        socketio.emit('folders_updated', namespace='/')
         
         return jsonify({'message': f"Đã tạo thư mục '{folder_name}' thành công!"}), 201
     except Exception as e:
@@ -653,7 +701,7 @@ def admin_rename_folder():
     data = request.get_json()
     old_name = data.get('old_name')
     new_name = data.get('new_name')
-    if not old_name or not new_name or old_name == 'Gốc (/)':
+    if not old_name or not new_name or old_name == 'Gốc' or old_name == 'Gốc (/)':
         return jsonify({'message': 'Thiếu tên thư mục cũ/mới hoặc không thể đổi tên Gốc.'}), 400
         
     old_path = get_cloudinary_folder_path(old_name)
@@ -666,15 +714,13 @@ def admin_rename_folder():
         old_public_id_prefix = f"{old_path}/"
         new_public_id_prefix = f"{new_path}/"
         
-        # Cập nhật public_id trong DB
         db.session.query(File).filter(File.public_id.like(f'{old_public_id_prefix}%')).update(
             {File.public_id: func.replace(File.public_id, old_public_id_prefix, new_public_id_prefix)}, 
             synchronize_session=False
         )
         db.session.commit()
         
-        # THÊM: Gửi socket event để thông báo cho tất cả client
-        socketio.emit('folders_updated', namespace='/chat')
+        socketio.emit('folders_updated', namespace='/')
         
         return jsonify({'message': f"Đã đổi tên thư mục từ '{old_name}' thành '{new_name}' thành công!"}), 200
     except Exception as e:
@@ -686,7 +732,7 @@ def admin_rename_folder():
 def admin_delete_folder():
     data = request.get_json()
     folder_name = data.get('folder_name')
-    if not folder_name or folder_name == 'Gốc (/)':
+    if not folder_name or folder_name == 'Gốc' or folder_name == 'Gốc (/)':
         return jsonify({'message': 'Tên thư mục không hợp lệ hoặc không thể xóa thư mục gốc.'}), 400
 
     full_path = get_cloudinary_folder_path(folder_name)
@@ -705,8 +751,7 @@ def admin_delete_folder():
         
         create_activity_log('DELETE_FOLDER', f'Xóa thư mục: {folder_name}')
         
-        # THÊM: Gửi socket event để thông báo cho tất cả client
-        socketio.emit('folders_updated', namespace='/chat')
+        socketio.emit('folders_updated', namespace='/')
         
         return jsonify({'message': f"Đã xóa thư mục '{folder_name}' và toàn bộ nội dung thành công!"}), 200
     except Exception as e:
@@ -884,7 +929,6 @@ def handle_connect():
         logger.info(f"User {current_user.username} connected (SID: {request.sid})")
         emit('user_connected', user_data, broadcast=True, include_self=False)
         
-        # BỌC TRUY VẤN DB TRONG SOCKETIO HANDLER
         with app.app_context():
             unread_messages = (db.session.query(Message.sender_id).filter(Message.recipient_id == current_user.id, Message.is_read == False).group_by(Message.sender_id).all())
             counts_dict = {}
@@ -905,7 +949,9 @@ def handle_disconnect():
             del online_users[user_id]
             logger.info(f"User {username} disconnected")
             emit('user_disconnected', {'id': user_id, 'username': username}, broadcast=True, include_self=False)
-        create_activity_log('LOGOUT', 'Ngắt kết nối')
+        # BỌC create_activity_log trong app_context
+        with app.app_context():
+             create_activity_log('LOGOUT', 'Ngắt kết nối')
 
 @socketio.on('private_message')
 @login_required
@@ -941,10 +987,9 @@ def handle_stop_typing(data):
         emit('user_stopped_typing', {'username': current_user.username}, room=recipient_sid)
 
 if __name__ == '__main__':
-    # THỰC HIỆN KHỞI TẠO DB TRONG LUỒNG CHÍNH KHI CHẠY LOCAL
     port = int(os.environ.get('PORT', 5000)) 
     
-    initialize_database(app, db)
+    # Giữ nguyên khối này nếu bạn chạy local
+    initialize_database(app, db) 
     
-    # Chạy SocketIO trên cổng 5000 cho môi trường local
     socketio.run(app, host='0.0.0.0', port=port)
