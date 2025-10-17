@@ -187,21 +187,19 @@ def init_db_command():
     click.echo('Database initialized/checked.')
 
 # ============================================================
-# LOGIC KEEP ALIVE (SỬA LỖI NAMEERROR/CONTEXT)
+# LOGIC KEEP ALIVE 
 # ============================================================
 SELF_PING_URL = os.environ.get('SELF_PING_URL')
 keep_alive_started = False 
 
 def ping_self():
     """Thực hiện ping server định kỳ để ngăn Render ngủ đông."""
-    # Render miễn phí idle sau 15 phút, ping mỗi 14 phút
     PING_INTERVAL_SECONDS = 840 
     
     while True:
         eventlet.sleep(PING_INTERVAL_SECONDS)
         
         try:
-            # BỌC REQUESTS TRONG CONTEXT để tránh lỗi khi các modules bị vá
             with app.app_context():
                 requests.get(SELF_PING_URL, timeout=10) 
                 logger.info(f"[KEEP-ALIVE] Ping thành công lúc: {datetime.now(timezone.utc)}")
@@ -283,7 +281,6 @@ def upload_update():
 @app.route('/')
 def index():
     logger.info("Health check received on /.")
-    # Đảm bảo Keep-Alive được khởi động NGAY SAU khi nhận request đầu tiên
     start_keep_alive_thread()
     return "Backend server for the application is running!"
 
@@ -399,6 +396,7 @@ def delete_file_post():
     if not file_record:
         return jsonify({'message': 'File không tồn tại trong CSDL.'}), 404
     
+    # Giữ nguyên kiểm tra Admin cho chức năng XÓA (DELETE)
     if not current_user.is_admin:
         return jsonify({'message': 'Bạn không có quyền xóa file này.'}), 403
     
@@ -488,10 +486,10 @@ def get_files():
         return jsonify({'message': 'Internal Server Error'}), 500
 
 # ============================================================
-# ENDPOINT MỚI: /files/in-folder
+# ENDPOINT MỚI: /files/in-folder (Nới lỏng quyền cho mọi user đăng nhập)
 # ============================================================
 @app.route('/files/in-folder', methods=['GET'])
-@login_required
+@login_required  # Đã thay thế @admin_required để cho phép Non-Admin truy cập
 def get_files_in_folder():
     """Trả về danh sách file trong thư mục cụ thể."""
     try:
@@ -550,71 +548,6 @@ def get_files_in_folder():
         return jsonify({'message': f'Internal Server Error: {e}'}), 500
 # ============================================================
 
-
-@app.route('/download', methods=['POST'])
-@login_required
-def download_file():
-    try:
-        data = request.get_json()
-        public_id = data.get('public_id')
-        if not public_id:
-            return jsonify({'message': 'Thiếu public_id'}), 400
-        logger.info(f"[DOWNLOAD] Nhận yêu cầu tải file: {public_id}")
-        file_record = File.query.filter_by(public_id=public_id).first()
-        if not file_record:
-            logger.warning(f"[DOWNLOAD] File không tồn tại trong DB: {public_id}")
-            return jsonify({'message': 'File không tồn tại.'}), 404
-        logger.info(f"[DOWNLOAD] Tìm thấy file: {file_record.filename}, resource_type: {file_record.resource_type}")
-        download_url, _ = cloudinary.utils.cloudinary_url(file_record.public_id, resource_type=file_record.resource_type, type="upload", attachment=True, flags="attachment", secure=True)
-        logger.info(f"[DOWNLOAD] URL tạo thành công")
-        create_activity_log('DOWNLOAD_FILE', f'File: {file_record.filename}')
-        return jsonify({'download_url': download_url})
-    except Exception as e:
-        logger.error(f"Error in /download: {e}")
-        return jsonify({'message': 'Internal Server Error'}), 500
-
-@app.route('/file/opened/<path:public_id>', methods=['POST'])
-@login_required
-def file_opened(public_id):
-    try:
-        file_record = File.query.filter_by(public_id=public_id).first()
-        if not file_record:
-            return jsonify({'message': 'File không tồn tại.'}), 404
-        new_access_log = FileAccessLog(file_id=file_record.id, user_id=current_user.id)
-        db.session.add(new_access_log)
-        file_record.last_opened_by = current_user.username
-        file_record.last_opened_at = datetime.now(timezone.utc)
-        db.session.commit()
-        create_activity_log('OPEN_FILE', f'File: {file_record.filename}')
-        return jsonify({'message': 'Đã ghi nhận lần mở file.'})
-    except Exception as e:
-        logger.error(f"Error in /file/opened: {e}")
-        return jsonify({'message': 'Internal Server Error'}), 500
-
-@app.route('/file/update', methods=['POST'])
-@login_required
-def update_file_content():
-    try:
-        if 'file' not in request.files:
-            return jsonify({'message': 'Thiếu file.'}), 400
-        data = request.form
-        public_id = data.get('public_id')
-        if not public_id:
-            return jsonify({'message': 'Thiếu public_id.'}), 400
-        file_record = File.query.filter_by(public_id=public_id).first()
-        if not file_record:
-            return jsonify({'message': 'File không tồn tại trong hệ thống.'}), 404
-        
-        uploaded_file = request.files['file']
-        logger.info(f"[AUTO-SYNC] User {current_user.username} đang cập nhật file: {file_record.filename}")
-        upload_result = cloudinary.uploader.upload(uploaded_file, public_id=public_id, overwrite=True, resource_type=file_record.resource_type, invalidate=True)
-        create_activity_log('UPDATE_FILE', f'Cập nhật file: {file_record.filename}')
-        logger.info(f"[AUTO-SYNC] File {file_record.filename} đã được cập nhật thành công!")
-        return jsonify({'message': f'File "{file_record.filename}" đã được cập nhật thành công!', 'version': upload_result.get('version'), 'updated_at': datetime.now(timezone.utc).isoformat()})
-    except Exception as e:
-        logger.error(f"Error in /file/update: {e}")
-        return jsonify({'message': f'Lỗi khi cập nhật file: {str(e)}'}), 500
-
 # ============================================================
 # LOGIC XÓA LOG CHO ADMIN
 # ============================================================
@@ -651,10 +584,10 @@ def admin_delete_log(log_id):
 # ============================================================
 
 # ============================================================
-# ADMIN - QUẢN LÝ THƯ MỤC CLOUDINARY
+# ADMIN - QUẢN LÝ THƯ MỤC CLOUDINARY (SỬA PHÂN QUYỀN GET)
 # ============================================================
 @app.route('/admin/folders', methods=['GET'])
-@admin_required
+@login_required  # Đã thay thế @admin_required để cho phép Non-Admin lấy danh sách thư mục
 def admin_get_folders():
     """Lấy danh sách thư mục con trong CLOUDINARY_USER_FILES_FOLDER."""
     try:
