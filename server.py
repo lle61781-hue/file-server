@@ -489,7 +489,7 @@ def get_files():
 # ENDPOINT MỚI: /files/in-folder (Nới lỏng quyền cho mọi user đăng nhập)
 # ============================================================
 @app.route('/files/in-folder', methods=['GET'])
-@login_required  # Đã sửa: Cho phép Non-Admin truy cập
+@login_required  # ĐÃ SỬA: Cho phép Non-Admin truy cập
 def get_files_in_folder():
     """Trả về danh sách file trong thư mục cụ thể."""
     try:
@@ -587,7 +587,7 @@ def admin_delete_log(log_id):
 # ADMIN - QUẢN LÝ THƯ MỤC CLOUDINARY (SỬA PHÂN QUYỀN GET)
 # ============================================================
 @app.route('/admin/folders', methods=['GET'])
-@login_required  # Đã sửa: Cho phép Non-Admin lấy danh sách thư mục
+@login_required  # ĐÃ SỬA: Cho phép Non-Admin lấy danh sách thư mục
 def admin_get_folders():
     """Lấy danh sách thư mục con trong CLOUDINARY_USER_FILES_FOLDER."""
     try:
