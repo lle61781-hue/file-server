@@ -31,6 +31,11 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 # Tăng giới hạn tải lên của Flask lên 256MB (giải pháp cho file lớn)
 app.config['MAX_CONTENT_LENGTH'] = 256 * 1024 * 1024 
 
+# KHẮC PHỤC LỖI HTTP 401 (UNAUTHORIZED) TỪ CLIENT DESKTOP (Quan trọng)
+app.config['SESSION_COOKIE_SECURE'] = True # Bắt buộc phải True khi dùng HTTPS/Render
+app.config['SESSION_COOKIE_SAMESITE'] = 'None' # Cho phép gửi cookie trong các yêu cầu cross-site
+app.config['SESSION_COOKIE_HTTPONLY'] = True # Bảo mật hơn
+
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet') 
