@@ -392,6 +392,76 @@ def get_history(partner_id):
         logger.error(f"Error accessing /history GET: {e}")
         return jsonify({'message': 'Internal Server Error'}), 500
 
+@app.route('/download', methods=['POST'])
+@login_required
+def download_file():
+    """
+    CUNG CẤP: Route bị thiếu mà client gọi để lấy URL tải xuống.
+    """
+    data = request.get_json()
+    public_id = data.get('public_id')
+    if not public_id:
+        return jsonify({'message': 'Thiếu ID công khai để tải file.'}), 400
+    
+    file_record = File.query.filter_by(public_id=public_id).first()
+    if not file_record:
+        return jsonify({'message': 'Lỗi HTTP 404: File không tồn tại.'}), 404
+
+    try:
+        # Sử dụng Cloudinary để tạo URL tải xuống có chữ ký (attachment=True và flags="download")
+        download_url, _ = cloudinary.utils.cloudinary_url(
+            file_record.public_id, 
+            resource_type=file_record.resource_type, 
+            attachment=True, 
+            flags="download",
+            type="authenticated", # Có thể dùng authenticated cho các file nhạy cảm
+            expires_at=int(time.time()) + 600 # Hết hạn sau 10 phút
+        )
+        
+        # NOTE: Client thực hiện tải xuống từ URL này, không phải từ server Flask
+        create_activity_log('DOWNLOAD_FILE_REQUEST', f'Yêu cầu tải: {file_record.filename}')
+        
+        return jsonify({'download_url': download_url})
+        
+    except Exception as e:
+        logger.error(f"Error accessing /download: {e}")
+        return jsonify({'message': f'Lỗi khi tạo URL tải xuống: {e}'}), 500
+
+@app.route('/file/opened/<public_id>', methods=['POST'])
+@login_required
+def log_file_opened(public_id):
+    """
+    CUNG CẤP: Route bị thiếu mà client gọi để ghi nhận lịch sử mở file.
+    """
+    try:
+        public_id_decoded = urllib.parse.unquote(public_id)
+        file_record = File.query.filter_by(public_id=public_id_decoded).first()
+        
+        if not file_record:
+            # Sửa lỗi: Nếu file không tồn tại, trả về 404
+            return jsonify({'message': 'Lỗi HTTP 404: File không tồn tại để ghi log.'}), 404
+
+        # 1. Cập nhật trạng thái mở file gần nhất
+        file_record.last_opened_by = current_user.username
+        file_record.last_opened_at = datetime.now(timezone.utc)
+        
+        # 2. Ghi log truy cập
+        access_log = FileAccessLog(
+            file_id=file_record.id,
+            user_id=current_user.id
+        )
+        db.session.add(access_log)
+        db.session.commit()
+
+        # 3. Ghi log hoạt động
+        create_activity_log('OPEN_FILE', f'Mở file: {file_record.filename}')
+        
+        return jsonify({'message': f'Đã ghi nhận mở file: {file_record.filename}'})
+        
+    except Exception as e:
+        logger.error(f"Error accessing /file/opened: {e}")
+        return jsonify({'message': f'Lỗi server khi ghi log mở file: {e}'}), 500
+
 @app.route('/delete-file', methods=['POST'])
 @login_required
 def delete_file_post():
@@ -700,7 +770,7 @@ def upload_avatar():
         return jsonify({'message': 'Không tìm thấy file ảnh.'}), 400
     avatar = request.files['avatar']
     try:
-        public_id = f"{CLOUDINARY_AVATAR_FOLDER}/user_{current_user.id}_{uuid.uuid4().hex[:6]}"
+        public_id = f"{CLOUDINARY_AVATAR_FOLDER}/user_{current_user.id}__{uuid.uuid4().hex[:6]}"
         upload_result = cloudinary.uploader.upload(avatar, public_id=public_id, folder=None, resource_type="image")
         
         new_file = File(filename=f"avatar_{uuid.uuid4().hex[:8]}", public_id=upload_result['public_id'], resource_type='image', user_id=current_user.id)
