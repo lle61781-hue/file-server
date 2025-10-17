@@ -65,6 +65,7 @@ except Exception as e:
 def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Đã ở trong request context, không cần app_context
         if not current_user.is_authenticated or not current_user.is_admin:
             return jsonify({'message': 'Yêu cầu quyền Admin!'}), 403
         return f(*args, **kwargs)
@@ -73,8 +74,8 @@ def admin_required(f):
 def create_activity_log(action, details=None, target_user_id=None):
     """Ghi log hoạt động của user."""
     try:
-        # BỌC trong app_context để tránh NameError/RuntimeError khi gọi từ greenlet/socketio
-        with app.app_context():
+        # BỌC trong app_context để đảm bảo truy cập DB an toàn từ luồng nền/socketio
+        with app.app_context(): 
             user_id = current_user.id if current_user.is_authenticated else None
             
             log_entry = ActivityLog(
@@ -161,8 +162,8 @@ class FileAccessLog(db.Model):
 
 @login_manager.user_loader
 def load_user(user_id):
-    with app.app_context():
-        return User.query.get(int(user_id))
+    # Đã ở trong app context, không cần bọc lại
+    return User.query.get(int(user_id))
 
 def initialize_database(app, db):
     """Khởi tạo database và tạo admin user nếu cần."""
@@ -205,7 +206,8 @@ def ping_self():
         eventlet.sleep(PING_INTERVAL_SECONDS)
         
         try:
-            with app.app_context():
+            # LƯU Ý: Phải có app_context khi truy cập DB hoặc các tài nguyên app.
+            with app.app_context(): 
                 requests.get(SELF_PING_URL, timeout=10) 
                 logger.info(f"[KEEP-ALIVE] Ping thành công lúc: {datetime.now(timezone.utc)}")
         except Exception as e:
@@ -963,7 +965,9 @@ if __name__ == '__main__':
     # THỰC HIỆN KHỞI TẠO DB TRONG LUỒNG CHÍNH KHI CHẠY LOCAL
     port = int(os.environ.get('PORT', 5000)) 
     
-    initialize_database(app, db)
+    # KHẮC PHỤC LỖI CONTEXT: Đảm bảo việc khởi tạo DB chạy trong Application Context
+    with app.app_context():
+        initialize_database(app, db)
     
     # Chạy SocketIO trên cổng 5000 cho môi trường local
     socketio.run(app, host='0.0.0.0', port=port)
