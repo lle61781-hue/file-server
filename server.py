@@ -280,8 +280,15 @@ def upload_update():
 
 @app.route('/')
 def index():
+    global keep_alive_started
     logger.info("Health check received on /.")
-    start_keep_alive_thread()
+    
+    # KHẮC PHỤC LỖI CONTEXT: Chỉ khởi động Keep-Alive khi ứng dụng đã load xong
+    if not keep_alive_started:
+        start_keep_alive_thread()
+        keep_alive_started = True
+        logger.info("Keep-Alive thread initialized successfully.")
+        
     return "Backend server for the application is running!"
 
 @app.route('/login', methods=['POST'])
@@ -396,7 +403,6 @@ def delete_file_post():
     if not file_record:
         return jsonify({'message': 'File không tồn tại trong CSDL.'}), 404
     
-    # Giữ nguyên kiểm tra Admin cho chức năng XÓA (DELETE)
     if not current_user.is_admin:
         return jsonify({'message': 'Bạn không có quyền xóa file này.'}), 403
     
@@ -427,7 +433,10 @@ def upload_file():
         file_base_name, file_extension = os.path.splitext(original_filename)
         safe_filename_part = secure_filename(file_base_name)
         
-        folder_path = get_cloudinary_folder_path(target_folder_name)
+        folder_path = CLOUDINARY_USER_FILES_FOLDER
+        if target_folder_name and target_folder_name != 'Gốc' and target_folder_name != 'Gốc (/)':
+            clean_folder_name = target_folder_name.strip('/')
+            folder_path = f"{CLOUDINARY_USER_FILES_FOLDER}/{clean_folder_name}"
         
         public_id_base = f"{folder_path}/{safe_filename_part}_{uuid.uuid4().hex[:6]}"
         
@@ -448,7 +457,6 @@ def upload_file():
 @app.route('/files', methods=['GET'])
 @login_required
 def get_files():
-    """Endpoint cũ, chỉ dùng để tương thích ngược nếu cần."""
     try:
         search_term = request.args.get('search', '').strip()
         
@@ -470,7 +478,12 @@ def get_files():
         for f in files:
             uploaded_by_username = f.owner.username if f.owner else "Người dùng đã bị xóa"
             
-            folder_name = get_folder_name_from_public_id(f.public_id)
+            full_folder_prefix = f"{CLOUDINARY_USER_FILES_FOLDER}/"
+            folder_name = 'Gốc'
+            if full_folder_prefix in f.public_id:
+                folder_path_raw = f.public_id.split(full_folder_prefix, 1)[-1]
+                if '/' in folder_path_raw:
+                    folder_name = folder_path_raw.rsplit('/', 1)[0]
                 
             file_list.append({
                 'filename': f.filename,
@@ -485,9 +498,6 @@ def get_files():
         logger.error(f"Error accessing /files: {e}")
         return jsonify({'message': 'Internal Server Error'}), 500
 
-# ============================================================
-# ENDPOINT MỚI: /files/in-folder (Nới lỏng quyền cho mọi user đăng nhập)
-# ============================================================
 @app.route('/files/in-folder', methods=['GET'])
 @login_required  # ĐÃ SỬA: Cho phép Non-Admin truy cập
 def get_files_in_folder():
@@ -546,46 +556,7 @@ def get_files_in_folder():
     except Exception as e:
         logger.error(f"Error accessing /files/in-folder: {e}")
         return jsonify({'message': f'Internal Server Error: {e}'}), 500
-# ============================================================
 
-# ============================================================
-# LOGIC XÓA LOG CHO ADMIN
-# ============================================================
-@app.route('/admin/logs/delete-all', methods=['DELETE'])
-@admin_required
-def admin_delete_all_logs():
-    try:
-        count = db.session.query(ActivityLog).delete()
-        db.session.commit()
-        create_activity_log('DELETE_ALL_LOGS', f'Đã xóa {count} bản ghi.')
-        return jsonify({'message': f'Đã xóa {count} bản ghi nhật ký hệ thống.'}), 200
-    except Exception as e:
-        logger.error(f"Error deleting all logs: {e}")
-        db.session.rollback()
-        return jsonify({'message': 'Lỗi server khi xóa tất cả logs.'}), 500
-
-@app.route('/admin/logs/delete/<int:log_id>', methods=['DELETE'])
-@admin_required
-def admin_delete_log(log_id):
-    try:
-        log_entry = ActivityLog.query.get(log_id)
-        if not log_entry:
-            return jsonify({'message': 'Log không tồn tại.'}), 404
-        
-        log_action = log_entry.action
-        db.session.delete(log_entry)
-        db.session.commit()
-        create_activity_log('DELETE_SINGLE_LOG', f'Xóa log ID: {log_id}, Hành động: {log_action}')
-        return jsonify({'message': f'Đã xóa bản ghi log ID {log_id}.'}), 200
-    except Exception as e:
-        logger.error(f"Error deleting single log: {e}")
-        db.session.rollback()
-        return jsonify({'message': 'Lỗi server khi xóa log đơn lẻ.'}), 500
-# ============================================================
-
-# ============================================================
-# ADMIN - QUẢN LÝ THƯ MỤC CLOUDINARY (SỬA PHÂN QUYỀN GET)
-# ============================================================
 @app.route('/admin/folders', methods=['GET'])
 @login_required  # ĐÃ SỬA: Cho phép Non-Admin lấy danh sách thư mục
 def admin_get_folders():
@@ -687,7 +658,6 @@ def admin_delete_folder():
         logger.error(f"Error deleting folder: {e}")
         db.session.rollback()
         return jsonify({'message': f'Lỗi khi xóa thư mục: {e}'}), 500
-# ============================================================
 
 
 @app.route('/admin/logs', methods=['GET'])
@@ -858,6 +828,7 @@ def handle_connect():
         logger.info(f"User {current_user.username} connected (SID: {request.sid})")
         emit('user_connected', user_data, broadcast=True, include_self=False)
         
+        # BỌC TRUY VẤN DB TRONG SOCKETIO HANDLER
         with app.app_context():
             unread_messages = (db.session.query(Message.sender_id).filter(Message.recipient_id == current_user.id, Message.is_read == False).group_by(Message.sender_id).all())
             counts_dict = {}
@@ -878,8 +849,7 @@ def handle_disconnect():
             del online_users[user_id]
             logger.info(f"User {username} disconnected")
             emit('user_disconnected', {'id': user_id, 'username': username}, broadcast=True, include_self=False)
-        with app.app_context():
-             create_activity_log('LOGOUT', 'Ngắt kết nối')
+        create_activity_log('LOGOUT', 'Ngắt kết nối')
 
 @socketio.on('private_message')
 @login_required
@@ -915,8 +885,10 @@ def handle_stop_typing(data):
         emit('user_stopped_typing', {'username': current_user.username}, room=recipient_sid)
 
 if __name__ == '__main__':
+    # THỰC HIỆN KHỞI TẠO DB TRONG LUỒNG CHÍNH KHI CHẠY LOCAL
     port = int(os.environ.get('PORT', 5000)) 
     
-    initialize_database(app, db) 
+    initialize_database(app, db)
     
+    # Chạy SocketIO trên cổng 5000 cho môi trường local
     socketio.run(app, host='0.0.0.0', port=port)
