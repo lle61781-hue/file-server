@@ -424,15 +424,14 @@ def download_file_route():
 @app.route('/file/opened/<path:public_id>', methods=['POST'])
 @login_required
 def file_opened(public_id):
-    """Ghi nhận lịch sử mở file."""
+    """Ghi nhận lịch sử mở file. Sử dụng public_id đã được Flask <path:> decode."""
     try:
-        # Giải mã public_id từ URL. Flask với <path:public_id> đã giải mã ký tự /, nhưng để đảm bảo an toàn
-        # ta vẫn sử dụng unquote() cho các ký tự đặc biệt khác nếu cần, dù thông thường không cần.
-        decoded_public_id = urllib.parse.unquote(public_id)
+        # Flask <path:> đã decode, KHÔNG cần urllib.parse.unquote()
         
         # Tìm file trong database
-        file_record = File.query.filter_by(public_id=decoded_public_id).first()
+        file_record = File.query.filter_by(public_id=public_id).first()
         if not file_record:
+            logger.warning(f"File not found: {public_id}")
             return jsonify({'message': 'File không tồn tại trong CSDL.'}), 404
             
         # Cập nhật thông tin lần mở gần nhất
