@@ -421,6 +421,43 @@ def download_file_route():
         logger.error(f"Error creating download URL: {e}")
         return jsonify({'message': f'Lỗi khi tạo URL tải xuống: {e}'}), 500
 
+@app.route('/file/opened/<path:public_id>', methods=['POST'])
+@login_required
+def file_opened(public_id):
+    """Ghi nhận lịch sử mở file."""
+    try:
+        # Giải mã public_id từ URL. Flask với <path:public_id> đã giải mã ký tự /, nhưng để đảm bảo an toàn
+        # ta vẫn sử dụng unquote() cho các ký tự đặc biệt khác nếu cần, dù thông thường không cần.
+        decoded_public_id = urllib.parse.unquote(public_id)
+        
+        # Tìm file trong database
+        file_record = File.query.filter_by(public_id=decoded_public_id).first()
+        if not file_record:
+            return jsonify({'message': 'File không tồn tại trong CSDL.'}), 404
+            
+        # Cập nhật thông tin lần mở gần nhất
+        file_record.last_opened_by = current_user.username
+        file_record.last_opened_at = datetime.now(timezone.utc)
+        
+        # Tạo log truy cập file
+        access_log = FileAccessLog(
+            file_id=file_record.id,
+            user_id=current_user.id
+        )
+        
+        db.session.add(access_log)
+        db.session.commit()
+        
+        # Tạo activity log
+        create_activity_log('OPEN_FILE', f'File: {file_record.filename}')
+        
+        return jsonify({'message': 'Đã ghi nhận mở file thành công.'})
+        
+    except Exception as e:
+        logger.error(f"Error in /file/opened: {e}")
+        db.session.rollback()
+        return jsonify({'message': f'Lỗi khi ghi nhận mở file: {e}'}), 500
+
 @app.route('/delete-file', methods=['POST'])
 @login_required
 def delete_file_post():
@@ -559,22 +596,9 @@ def get_files_in_folder():
                  continue
                  
             # Lấy phần tên file/thư mục con sau tiền tố hiện tại
-            # Ví dụ: public_id_prefix = pyside_chat_app/user_files/Test
-            # f.public_id = pyside_chat_app/user_files/Test/file_12345
             relative_path = f.public_id.split(f'{public_id_prefix}/', 1)[-1]
             
             # Nếu relative_path chứa dấu '/', tức là nó là file trong thư mục con, BỎ QUA
-            # Cloudinary public_id là đường dẫn đầy đủ không có phần mở rộng (ví dụ: folder/filename_uuid)
-            # relative_path sẽ là: filename_uuid
-            # Nếu nó là thư mục con, relative_path sẽ là: subfolder/filename_uuid
-            
-            # Do không có thông tin loại file trong public_id, ta dựa vào việc tìm kiếm các ký tự sau public_id_prefix.
-            # Cách an toàn hơn là kiểm tra xem có dấu / nào sau public_id_prefix/ và trước tên file không
-            
-            # Tạm thời dựa vào logic của Client để chỉ hiển thị file (không phải thư mục)
-            # và chấp nhận nếu Cloudinary không phân cấp folder quá sâu trong public_id
-            
-            # Bỏ qua nếu có thư mục con (chỉ hiển thị file cấp 1)
             if folder_name != 'Gốc' and '/' in relative_path and relative_path.index('/') < len(relative_path) - 1:
                 continue
 
