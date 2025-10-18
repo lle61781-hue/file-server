@@ -12,3 +12,4 @@ python-dateutil==2.9.0.post0
 cloudinary==1.44.1
 psycopg2-binary==2.9.11
 dnspython==2.8.0
+PyJWT>=2.0.0
