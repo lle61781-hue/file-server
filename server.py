@@ -113,8 +113,8 @@ class File(db.Model):
     upload_date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     last_opened_by = db.Column(db.String(80), nullable=True) 
     last_opened_at = db.Column(db.DateTime, nullable=True) 
-    # Bổ sung trường này cho chức năng đồng bộ (sync)
-    last_modified_at = db.Column(db.DateTime, nullable=True)
+    # TẠM THỜI BỎ TRƯỜNG last_modified_at để khắc phục lỗi 500 do DB chưa migration
+    # last_modified_at = db.Column(db.DateTime, nullable=True)
     
     access_logs = db.relationship('FileAccessLog', backref='file', lazy=True, cascade="all, delete-orphan")
 
@@ -165,8 +165,6 @@ def initialize_database(app, db):
     """Khởi tạo database và tạo admin user nếu cần."""
     with app.app_context(): 
         try:
-            # Lưu ý: Nếu bạn thay đổi Model, bạn có thể cần Flask-Migrate 
-            # để thực hiện migration thay vì db.create_all()
             db.create_all() 
             logger.info("Database tables created successfully (or checked).")
         except Exception as e:
@@ -335,9 +333,7 @@ def update_file_sync():
             overwrite=True # Rất quan trọng: ghi đè file cũ
         )
         
-        # Cập nhật metadata trong DB (thời gian sửa đổi gần nhất)
-        file_record.last_modified_at = datetime.now(timezone.utc)
-        db.session.commit()
+        # db.session.commit()
         
         create_activity_log('FILE_SYNC_UPDATE', f'Đồng bộ cập nhật file: {file_record.filename}', target_user_id=file_record.user_id)
         
@@ -546,7 +542,7 @@ def upload_file():
         safe_filename_part = secure_filename(file_base_name)
         
         folder_path = CLOUDINARY_USER_FILES_FOLDER
-        if target_folder_name and target_folder_name != 'Gốc' and target_folder_name != 'Gốc (/)':
+        if target_folder_name and target_folder_name != 'Gốc' and target_folder_name != 'Gốc (/)'):
             clean_folder_name = target_folder_name.strip('/')
             folder_path = f"{CLOUDINARY_USER_FILES_FOLDER}/{clean_folder_name}"
         
