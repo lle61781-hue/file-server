@@ -31,11 +31,6 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 # Tăng giới hạn tải lên của Flask lên 256MB (giải pháp cho file lớn)
 app.config['MAX_CONTENT_LENGTH'] = 256 * 1024 * 1024 
 
-# KHẮC PHỤC LỖI HTTP 401 (UNAUTHORIZED) TỪ CLIENT DESKTOP (Quan trọng)
-app.config['SESSION_COOKIE_SECURE'] = True # Bắt buộc phải True khi dùng HTTPS/Render
-app.config['SESSION_COOKIE_SAMESITE'] = 'None' # Cho phép gửi cookie trong các yêu cầu cross-site
-app.config['SESSION_COOKIE_HTTPONLY'] = True # Bảo mật hơn
-
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet') 
@@ -65,7 +60,6 @@ except Exception as e:
 def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # Đã ở trong request context, không cần app_context
         if not current_user.is_authenticated or not current_user.is_admin:
             return jsonify({'message': 'Yêu cầu quyền Admin!'}), 403
         return f(*args, **kwargs)
@@ -74,8 +68,8 @@ def admin_required(f):
 def create_activity_log(action, details=None, target_user_id=None):
     """Ghi log hoạt động của user."""
     try:
-        # BỌC trong app_context để đảm bảo truy cập DB an toàn từ luồng nền/socketio
-        with app.app_context(): 
+        # BỌC trong app_context để tránh NameError/RuntimeError khi gọi từ greenlet/socketio
+        with app.app_context():
             user_id = current_user.id if current_user.is_authenticated else None
             
             log_entry = ActivityLog(
@@ -162,8 +156,8 @@ class FileAccessLog(db.Model):
 
 @login_manager.user_loader
 def load_user(user_id):
-    # Đã ở trong app context, không cần bọc lại
-    return User.query.get(int(user_id))
+    with app.app_context():
+        return User.query.get(int(user_id))
 
 def initialize_database(app, db):
     """Khởi tạo database và tạo admin user nếu cần."""
@@ -206,8 +200,7 @@ def ping_self():
         eventlet.sleep(PING_INTERVAL_SECONDS)
         
         try:
-            # LƯU Ý: Phải có app_context khi truy cập DB hoặc các tài nguyên app.
-            with app.app_context(): 
+            with app.app_context():
                 requests.get(SELF_PING_URL, timeout=10) 
                 logger.info(f"[KEEP-ALIVE] Ping thành công lúc: {datetime.now(timezone.utc)}")
         except Exception as e:
@@ -401,10 +394,8 @@ def get_history(partner_id):
 
 @app.route('/download', methods=['POST'])
 @login_required
-def download_file():
-    """
-    CUNG CẤP: Route bị thiếu mà client gọi để lấy URL tải xuống.
-    """
+def download_file_route():
+    """Tạo URL tải xuống có chữ ký (signed download URL) từ public_id."""
     data = request.get_json()
     public_id = data.get('public_id')
     if not public_id:
@@ -412,62 +403,23 @@ def download_file():
     
     file_record = File.query.filter_by(public_id=public_id).first()
     if not file_record:
-        return jsonify({'message': 'Lỗi HTTP 404: File không tồn tại.'}), 404
-
+        return jsonify({'message': 'File không tồn tại trong CSDL.'}), 404
+        
     try:
-        # Sử dụng Cloudinary để tạo URL tải xuống có chữ ký (attachment=True và flags="download")
+        # Tạo URL tải xuống đã ký (signed download URL)
         download_url, _ = cloudinary.utils.cloudinary_url(
-            file_record.public_id, 
+            public_id, 
             resource_type=file_record.resource_type, 
             attachment=True, 
-            flags="download",
-            type="authenticated", # Có thể dùng authenticated cho các file nhạy cảm
-            expires_at=int(time.time()) + 600 # Hết hạn sau 10 phút
+            flags="download"
         )
         
-        # NOTE: Client thực hiện tải xuống từ URL này, không phải từ server Flask
-        create_activity_log('DOWNLOAD_FILE_REQUEST', f'Yêu cầu tải: {file_record.filename}')
+        create_activity_log('DOWNLOAD_FILE', f'File: {file_record.filename}')
         
         return jsonify({'download_url': download_url})
-        
     except Exception as e:
-        logger.error(f"Error accessing /download: {e}")
+        logger.error(f"Error creating download URL: {e}")
         return jsonify({'message': f'Lỗi khi tạo URL tải xuống: {e}'}), 500
-
-@app.route('/file/opened/<public_id>', methods=['POST'])
-@login_required
-def log_file_opened(public_id):
-    """
-    CUNG CẤP: Route bị thiếu mà client gọi để ghi nhận lịch sử mở file.
-    """
-    try:
-        public_id_decoded = urllib.parse.unquote(public_id)
-        file_record = File.query.filter_by(public_id=public_id_decoded).first()
-        
-        if not file_record:
-            # Sửa lỗi: Nếu file không tồn tại, trả về 404
-            return jsonify({'message': 'Lỗi HTTP 404: File không tồn tại để ghi log.'}), 404
-
-        # 1. Cập nhật trạng thái mở file gần nhất
-        file_record.last_opened_by = current_user.username
-        file_record.last_opened_at = datetime.now(timezone.utc)
-        
-        # 2. Ghi log truy cập
-        access_log = FileAccessLog(
-            file_id=file_record.id,
-            user_id=current_user.id
-        )
-        db.session.add(access_log)
-        db.session.commit()
-
-        # 3. Ghi log hoạt động
-        create_activity_log('OPEN_FILE', f'Mở file: {file_record.filename}')
-        
-        return jsonify({'message': f'Đã ghi nhận mở file: {file_record.filename}'})
-        
-    except Exception as e:
-        logger.error(f"Error accessing /file/opened: {e}")
-        return jsonify({'message': f'Lỗi server khi ghi log mở file: {e}'}), 500
 
 @app.route('/delete-file', methods=['POST'])
 @login_required
@@ -499,6 +451,7 @@ def upload_file():
     if 'file' not in request.files:
         return jsonify({'message': 'Không tìm thấy file.'}), 400
     
+    # SỬA LỖI: Lấy target_folder_name từ form data
     target_folder_name = request.form.get('target_folder', 'Gốc')
     
     file = request.files['file']
@@ -510,14 +463,13 @@ def upload_file():
         file_base_name, file_extension = os.path.splitext(original_filename)
         safe_filename_part = secure_filename(file_base_name)
         
-        folder_path = CLOUDINARY_USER_FILES_FOLDER
-        if target_folder_name and target_folder_name != 'Gốc' and target_folder_name != 'Gốc (/)':
-            clean_folder_name = target_folder_name.strip('/')
-            folder_path = f"{CLOUDINARY_USER_FILES_FOLDER}/{clean_folder_name}"
+        # SỬA CHỮA CHÍNH: Sử dụng hàm tiện ích để lấy đường dẫn thư mục chính xác.
+        folder_path = get_cloudinary_folder_path(target_folder_name)
         
         public_id_base = f"{folder_path}/{safe_filename_part}_{uuid.uuid4().hex[:6]}"
         
-        upload_result = cloudinary.uploader.upload(file, public_id=public_id_base, resource_type="auto")
+        # Chỉ truyền folder=None để Cloudinary tự xác định folder từ public_id
+        upload_result = cloudinary.uploader.upload(file, public_id=public_id_base, resource_type="auto", folder=None)
         resource_type_from_cloudinary = upload_result.get('resource_type', 'raw')
         
         new_file = File(filename=original_filename, public_id=upload_result['public_id'], resource_type=resource_type_from_cloudinary, user_id=current_user.id)
@@ -576,9 +528,9 @@ def get_files():
         return jsonify({'message': 'Internal Server Error'}), 500
 
 @app.route('/files/in-folder', methods=['GET'])
-@login_required  # ĐÃ SỬA: Cho phép Non-Admin truy cập
+@login_required 
 def get_files_in_folder():
-    """Trả về danh sách file trong thư mục cụ thể."""
+    """Trả về danh sách file CHỈ nằm trong thư mục cụ thể (không bao gồm thư mục con)."""
     try:
         # Giải mã tên thư mục (ví dụ: G%E1%BB%91c -> Gốc)
         folder_name_encoded = request.args.get('folder', 'Gốc')
@@ -607,11 +559,24 @@ def get_files_in_folder():
                  continue
                  
             # Lấy phần tên file/thư mục con sau tiền tố hiện tại
+            # Ví dụ: public_id_prefix = pyside_chat_app/user_files/Test
+            # f.public_id = pyside_chat_app/user_files/Test/file_12345
             relative_path = f.public_id.split(f'{public_id_prefix}/', 1)[-1]
             
             # Nếu relative_path chứa dấu '/', tức là nó là file trong thư mục con, BỎ QUA
-            if '/' in relative_path:
-                 continue
+            # Cloudinary public_id là đường dẫn đầy đủ không có phần mở rộng (ví dụ: folder/filename_uuid)
+            # relative_path sẽ là: filename_uuid
+            # Nếu nó là thư mục con, relative_path sẽ là: subfolder/filename_uuid
+            
+            # Do không có thông tin loại file trong public_id, ta dựa vào việc tìm kiếm các ký tự sau public_id_prefix.
+            # Cách an toàn hơn là kiểm tra xem có dấu / nào sau public_id_prefix/ và trước tên file không
+            
+            # Tạm thời dựa vào logic của Client để chỉ hiển thị file (không phải thư mục)
+            # và chấp nhận nếu Cloudinary không phân cấp folder quá sâu trong public_id
+            
+            # Bỏ qua nếu có thư mục con (chỉ hiển thị file cấp 1)
+            if folder_name != 'Gốc' and '/' in relative_path and relative_path.index('/') < len(relative_path) - 1:
+                continue
 
             # Áp dụng tìm kiếm nếu có
             if search_term and search_term.lower() not in f.filename.lower():
@@ -635,7 +600,7 @@ def get_files_in_folder():
         return jsonify({'message': f'Internal Server Error: {e}'}), 500
 
 @app.route('/admin/folders', methods=['GET'])
-@login_required  # ĐÃ SỬA: Cho phép Non-Admin lấy danh sách thư mục
+@login_required  
 def admin_get_folders():
     """Lấy danh sách thư mục con trong CLOUDINARY_USER_FILES_FOLDER."""
     try:
@@ -777,7 +742,7 @@ def upload_avatar():
         return jsonify({'message': 'Không tìm thấy file ảnh.'}), 400
     avatar = request.files['avatar']
     try:
-        public_id = f"{CLOUDINARY_AVATAR_FOLDER}/user_{current_user.id}__{uuid.uuid4().hex[:6]}"
+        public_id = f"{CLOUDINARY_AVATAR_FOLDER}/user_{current_user.id}_{uuid.uuid4().hex[:6]}"
         upload_result = cloudinary.uploader.upload(avatar, public_id=public_id, folder=None, resource_type="image")
         
         new_file = File(filename=f"avatar_{uuid.uuid4().hex[:8]}", public_id=upload_result['public_id'], resource_type='image', user_id=current_user.id)
@@ -965,9 +930,7 @@ if __name__ == '__main__':
     # THỰC HIỆN KHỞI TẠO DB TRONG LUỒNG CHÍNH KHI CHẠY LOCAL
     port = int(os.environ.get('PORT', 5000)) 
     
-    # KHẮC PHỤC LỖI CONTEXT: Đảm bảo việc khởi tạo DB chạy trong Application Context
-    with app.app_context():
-        initialize_database(app, db)
+    initialize_database(app, db)
     
     # Chạy SocketIO trên cổng 5000 cho môi trường local
     socketio.run(app, host='0.0.0.0', port=port)
