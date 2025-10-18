@@ -333,7 +333,8 @@ def update_file_sync():
             overwrite=True # Rất quan trọng: ghi đè file cũ
         )
         
-        # db.session.commit()
+        # BỎ QUA: Không cập nhật last_modified_at (Lựa chọn 2)
+        db.session.commit()
         
         create_activity_log('FILE_SYNC_UPDATE', f'Đồng bộ cập nhật file: {file_record.filename}', target_user_id=file_record.user_id)
         
@@ -345,7 +346,7 @@ def update_file_sync():
         return jsonify({'message': f'Lỗi khi đồng bộ file: {e}'}), 500
 
 # ============================================================
-# CÁC ROUTES KHÁC (Được giữ nguyên từ mã nguồn của bạn)
+# CÁC ROUTES KHÁC (Đã sửa lỗi Cú pháp)
 # ============================================================
 
 @app.route('/update', methods=['GET'])
@@ -542,7 +543,8 @@ def upload_file():
         safe_filename_part = secure_filename(file_base_name)
         
         folder_path = CLOUDINARY_USER_FILES_FOLDER
-        if target_folder_name and target_folder_name != 'Gốc' and target_folder_name != 'Gốc (/)'):
+        # SỬA LỖI CÚ PHÁP: Xóa dấu ngoặc đơn thừa
+        if target_folder_name and target_folder_name != 'Gốc' and target_folder_name != 'Gốc (/)': 
             clean_folder_name = target_folder_name.strip('/')
             folder_path = f"{CLOUDINARY_USER_FILES_FOLDER}/{clean_folder_name}"
         
