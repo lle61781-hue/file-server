@@ -3,10 +3,11 @@ import eventlet
 eventlet.monkey_patch() 
 
 import os, click, cloudinary, cloudinary.uploader, cloudinary.api
-from datetime import datetime, timezone
+from datetime import datetime, timezone # Đã sửa để dùng timezone.utc
 from flask import Flask, request, jsonify, send_from_directory
 from flask.cli import with_appcontext 
 from flask_sqlalchemy import SQLAlchemy
+# XÓA: from flask_migrate import Migrate
 from sqlalchemy import inspect, or_, not_
 from sqlalchemy.sql import func 
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -28,15 +29,15 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'a-fallback-secret-key-for-development')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL') or 'sqlite:///' + os.path.join(basedir, 'app.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-# Tăng giới hạn tải lên của Flask lên 256MB (giải pháp cho vấn đề 413)
 app.config['MAX_CONTENT_LENGTH'] = 256 * 1024 * 1024 
 
 db = SQLAlchemy(app)
+# XÓA: migrate = Migrate(app, db)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 login_manager = LoginManager()
 login_manager.init_app(app)
 
-# Cấu hình Cloudinary (cần thiết cho chức năng tải file)
+# Cấu hình Cloudinary
 CLOUDINARY_CLOUD_NAME = os.environ.get('CLOUDINARY_CLOUD_NAME')
 CLOUDINARY_API_KEY = os.environ.get('CLOUDINARY_API_KEY')
 CLOUDINARY_API_SECRET = os.environ.get('CLOUDINARY_API_SECRET')
@@ -51,12 +52,11 @@ if CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET:
 else:
     print("WARNING: Cloudinary environment variables not set. File uploads will fail.")
 
-# Biến toàn cục để lưu trữ SID của người dùng đang online (dùng cho SocketIO)
 online_users = {}
 
 # --- HẰNG SỐ ADMIN MẶC ĐỊNH ---
 ADMIN_USERNAME = 'admin'
-ADMIN_PASSWORD = '123'
+ADMIN_PASSWORD = 'password123'
 # ------------------------------
 
 # --- MODELS ---
@@ -64,9 +64,9 @@ class User(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     password_hash = db.Column(db.String(128), nullable=False)
-    registration_date = db.Column(db.DateTime, default=datetime.now)
+    registration_date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc)) # Dùng lambda và UTC
     is_online = db.Column(db.Boolean, default=False)
-    is_admin = db.Column(db.Boolean, default=False)  # <<< TRƯỜNG MỚI CHO ADMIN
+    is_admin = db.Column(db.Boolean, default=False)
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -78,9 +78,9 @@ class User(db.Model, UserMixin):
         return {
             'id': self.id,
             'username': self.username,
-            'registration_date': self.registration_date.isoformat(),
+            'registration_date': self.registration_date.isoformat() if self.registration_date else None,
             'is_online': self.is_online,
-            'is_admin': self.is_admin # Thêm trường Admin
+            'is_admin': self.is_admin
         }
 
 class Message(db.Model):
@@ -88,7 +88,7 @@ class Message(db.Model):
     sender_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     recipient_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     content = db.Column(db.String(1024), nullable=False)
-    timestamp = db.Column(db.DateTime, default=datetime.now)
+    timestamp = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc)) # Dùng lambda và UTC
     is_read = db.Column(db.Boolean, default=False)
 
     sender = db.relationship('User', foreign_keys=[sender_id], backref='sent_messages')
@@ -101,26 +101,26 @@ class Message(db.Model):
             'recipient_id': self.recipient_id,
             'sender': self.sender.username,
             'message': self.content,
-            'timestamp': self.timestamp.isoformat(),
+            'timestamp': self.timestamp.isoformat() if self.timestamp else None,
             'is_read': self.is_read
         }
 
 class ActivityLog(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    action = db.Column(db.String(100), nullable=False) # e.g., 'LOGIN', 'SEND_MESSAGE', 'UPLOAD_FILE'
+    action = db.Column(db.String(100), nullable=False)
     details = db.Column(db.String(500), nullable=True)
-    timestamp = db.Column(db.DateTime, default=datetime.now)
+    timestamp = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc)) # Dùng lambda và UTC
     target_user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
 
-# --- LOGIN MANAGER CONFIG ---
+# --- LOGIN MANAGER & DECORATORS ---
 @login_manager.user_loader
 def load_user(user_id):
-    return User.query.get(int(user_id))
+    return db.session.execute(db.select(User).filter_by(id=int(user_id))).scalar_one_or_none()
 
 def create_activity_log(action, details, target_user_id=None):
     if not current_user.is_authenticated:
-        return # Bỏ qua log nếu không có user
+        return
         
     log = ActivityLog(
         user_id=current_user.id,
@@ -131,7 +131,6 @@ def create_activity_log(action, details, target_user_id=None):
     db.session.add(log)
     db.session.commit()
 
-# --- CUSTOM DECORATORS ---
 def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -140,17 +139,29 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# --- FLASK CLI COMMANDS (Tạo Admin tự động) ---
-@app.cli.command('init-db')
+# --- FLASK CLI COMMANDS (Lệnh Reset & Tạo Admin đơn giản) ---
+@app.cli.command('create-db-and-admin') 
 @with_appcontext
-def init_db_command():
-    """Tạo các bảng cơ sở dữ liệu và thêm tài khoản Admin mặc định."""
-    print("Đang tạo bảng database...")
-    db.create_all()
-    print("Database tables created.")
+def create_db_and_admin_command():
+    """⚠️ XÓA TOÀN BỘ DỮ LIỆU và tạo lại database, sau đó tạo tài khoản Admin."""
     
-    # Kiểm tra và tạo tài khoản Admin
-    admin_exists = db.session.execute(db.select(User).filter_by(username=ADMIN_USERNAME)).scalar_one_or_none()
+    # 1. XÓA TẤT CẢ CÁC BẢNG (DROP ALL) - Bắt buộc để xóa schema cũ
+    print("⚠️ Đang xóa tất cả các bảng (TẤT CẢ DỮ LIỆU SẼ BỊ MẤT)...")
+    try:
+        db.drop_all()
+        print("Xóa thành công.")
+    except Exception as e:
+        print(f"Lỗi khi xóa bảng (có thể do bảng chưa tồn tại): {e}")
+
+    # 2. TẠO LẠI CÁC BẢNG (CREATE ALL)
+    print("Đang tạo lại các bảng database...")
+    db.create_all()
+    print("Tạo database thành công!")
+    
+    # 3. KIỂM TRA VÀ TẠO ADMIN
+    admin_exists = db.session.execute(
+        db.select(User).filter_by(username=ADMIN_USERNAME)
+    ).scalar_one_or_none()
     
     if not admin_exists:
         print(f"Không tìm thấy Admin. Đang tạo tài khoản Admin: {ADMIN_USERNAME} / {ADMIN_PASSWORD}")
@@ -160,9 +171,9 @@ def init_db_command():
         db.session.commit()
         print("Tạo tài khoản Admin thành công!")
     else:
-        print(f"Tài khoản Admin ('{ADMIN_USERNAME}') đã tồn tại. Bỏ qua việc tạo.")
+        print(f"Tài khoản Admin ('{ADMIN_USERNAME}') đã tồn tại. Bỏ qua việc tạo Admin.")
 
-# --- API ENDPOINTS ---
+# --- API ENDPOINTS (Không thay đổi) ---
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -170,30 +181,26 @@ def login():
     username = data.get('username')
     password = data.get('password')
 
-    user = User.query.filter_by(username=username).first()
+    user = db.session.execute(db.select(User).filter_by(username=username)).scalar_one_or_none()
 
     if user and user.check_password(password):
         login_user(user)
-        # Cập nhật trạng thái online
         user.is_online = True
         db.session.commit()
-        # Log hoạt động
         create_activity_log('LOGIN', f'Đăng nhập thành công')
         
-        # Trả về JWT hoặc data + token placeholder cho client Flutter
-        # (Sử dụng ID người dùng làm token cho SocketIO, vì Flask-Login không tạo JWT)
         return jsonify({
             'message': 'Đăng nhập thành công',
-            'access_token': str(uuid.uuid4()), # Đây chỉ là token placeholder cho client Flutter
+            'access_token': str(uuid.uuid4()),
             'user_data': user.to_dict()
         }), 200
     
     return jsonify({'message': 'Tên người dùng hoặc mật khẩu không đúng.'}), 401
 
-# @app.route('/register', methods=['POST'])
-# def register():
-#     """ĐÃ BỊ VÔ HIỆU HÓA theo yêu cầu, chỉ Admin mới được tạo người dùng."""
-#     return jsonify({'message': 'Đăng ký đã bị vô hiệu hóa. Vui lòng liên hệ Admin.'}), 403
+@app.route('/register', methods=['POST'])
+def register():
+    """ĐÃ BỊ VÔ HIỆU HÓA. Chỉ Admin mới được tạo người dùng."""
+    return jsonify({'message': 'Đăng ký đã bị vô hiệu hóa. Vui lòng liên hệ Admin.'}), 403
 
 @app.route('/admin/create_user', methods=['POST'])
 @admin_required
@@ -205,7 +212,7 @@ def create_user():
     if not username or not password:
         return jsonify({'message': 'Thiếu tên người dùng hoặc mật khẩu.'}), 400
         
-    if User.query.filter_by(username=username).first():
+    if db.session.execute(db.select(User).filter_by(username=username)).scalar_one_or_none():
         return jsonify({'message': 'Tên người dùng đã tồn tại.'}), 409
 
     new_user = User(username=username, is_admin=False)
@@ -220,7 +227,7 @@ def create_user():
 @app.route('/get_user_list', methods=['GET'])
 @login_required
 def get_user_list():
-    users = User.query.all()
+    users = db.session.execute(db.select(User)).scalars().all()
     return jsonify([user.to_dict() for user in users]), 200
 
 @app.route('/get_messages', methods=['GET'])
@@ -231,20 +238,22 @@ def get_messages():
     if not target_user_id:
         return jsonify([]), 200
         
-    # Lấy tin nhắn giữa người dùng hiện tại và người dùng mục tiêu
-    messages = Message.query.filter(
-        or_(
-            (Message.sender_id == current_user.id) & (Message.recipient_id == target_user_id),
-            (Message.sender_id == target_user_id) & (Message.recipient_id == current_user.id)
-        )
-    ).order_by(Message.timestamp).all()
+    messages = db.session.execute(
+        db.select(Message).filter(
+            or_(
+                (Message.sender_id == current_user.id) & (Message.recipient_id == target_user_id),
+                (Message.sender_id == target_user_id) & (Message.recipient_id == current_user.id)
+            )
+        ).order_by(Message.timestamp)
+    ).scalars().all()
     
-    # Đánh dấu tin nhắn nhận được là đã đọc
-    unread_messages = Message.query.filter(
-        (Message.sender_id == target_user_id) & 
-        (Message.recipient_id == current_user.id) & 
-        (Message.is_read == False)
-    ).all()
+    unread_messages = db.session.execute(
+        db.select(Message).filter(
+            (Message.sender_id == target_user_id) & 
+            (Message.recipient_id == current_user.id) & 
+            (Message.is_read == False)
+        )
+    ).scalars().all()
     
     for msg in unread_messages:
         msg.is_read = True
@@ -268,7 +277,6 @@ def upload_file():
         return jsonify({'message': 'Lỗi server: Chưa cấu hình Cloudinary.'}), 500
         
     try:
-        # Tải file lên Cloudinary
         upload_result = cloudinary.uploader.upload(
             file,
             folder="chat_files",
@@ -287,17 +295,14 @@ def upload_file():
         logger.error(f"Lỗi tải file lên Cloudinary: {e}")
         return jsonify({'message': f'Lỗi tải file lên server: {str(e)}'}), 500
 
-# --- SOCKETIO EVENTS ---
+# --- SOCKETIO EVENTS (Không thay đổi) ---
 
 @socketio.on('connect')
 def handle_connect():
     if current_user.is_authenticated:
         online_users[current_user.id] = request.sid
         logger.info(f"User connected: {current_user.username} (ID: {current_user.id}, SID: {request.sid})")
-        # Thông báo cho người dùng khác user này đã online (TODO)
     else:
-        # Ngắt kết nối nếu không được xác thực qua token (dù đã pass qua @login_required)
-        # Logic này phụ thuộc vào cách client Flutter gửi token qua query params
         pass 
 
 @socketio.on('disconnect')
@@ -306,16 +311,12 @@ def handle_disconnect():
         if online_users.get(current_user.id) == request.sid:
             del online_users[current_user.id]
             logger.info(f"User disconnected: {current_user.username} (ID: {current_user.id})")
-            # Cập nhật trạng thái trong DB (sau 5s để tránh disconnect tạm thời)
-            # Dùng eventlet.spawn_after để xử lý bất đồng bộ (tránh block SocketIO)
             eventlet.spawn_after(5, check_and_update_offline, current_user.id)
-            # Thông báo user offline (TODO)
             
 def check_and_update_offline(user_id):
     with app.app_context():
-        # Chỉ cập nhật offline nếu user_id không có trong online_users
         if user_id not in online_users:
-            user = User.query.get(user_id)
+            user = db.session.execute(db.select(User).filter_by(id=user_id)).scalar_one_or_none()
             if user:
                 user.is_online = False
                 db.session.commit()
@@ -330,16 +331,14 @@ def handle_send_message(data):
     if not recipient_id or not content:
         return
         
-    # Lưu tin nhắn vào DB
     new_msg = Message(sender_id=current_user.id, recipient_id=recipient_id, content=content)
     db.session.add(new_msg)
     db.session.commit()
     
-    recipient = User.query.get(recipient_id)
+    recipient = db.session.execute(db.select(User).filter_by(id=recipient_id)).scalar_one_or_none()
     if recipient:
         create_activity_log('SEND_MESSAGE', f'Gửi tin nhắn đến: {recipient.username}', target_user_id=recipient_id)
         
-    # Chuẩn bị data gửi qua SocketIO
     msg_data = {
         'id': new_msg.id, 
         'sender': current_user.username, 
@@ -348,12 +347,10 @@ def handle_send_message(data):
         'timestamp': new_msg.timestamp.isoformat()
     }
     
-    # Gửi đến người nhận (nếu online)
     recipient_sid = online_users.get(recipient_id)
     if recipient_sid:
         emit('message_from_server', msg_data, room=recipient_sid)
         
-    # Gửi lại cho người gửi để cập nhật UI ngay lập tức
     emit('message_from_server', msg_data, room=request.sid)
 
 @socketio.on('start_typing')
@@ -372,7 +369,5 @@ def handle_stop_typing(data):
 
 
 if __name__ == '__main__':
-    # Chạy server với eventlet
-    # Đảm bảo bạn chạy lệnh: python server.py hoặc flask run (sau khi gọi init-db)
     print("Running Flask-SocketIO server with Eventlet...")
     socketio.run(app, host='0.0.0.0', port=os.environ.get('PORT', 5000), debug=True)
