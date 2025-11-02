@@ -3,11 +3,10 @@ import eventlet
 eventlet.monkey_patch() 
 
 import os, click, cloudinary, cloudinary.uploader, cloudinary.api
-from datetime import datetime, timezone # Đã sửa để dùng timezone.utc
+from datetime import datetime, timezone 
 from flask import Flask, request, jsonify, send_from_directory
 from flask.cli import with_appcontext 
 from flask_sqlalchemy import SQLAlchemy
-# XÓA: from flask_migrate import Migrate
 from sqlalchemy import inspect, or_, not_
 from sqlalchemy.sql import func 
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -24,6 +23,7 @@ import urllib.parse
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- CẤU HÌNH VÀ KHỞI TẠO ỨNG DỤNG ---
 basedir = os.path.abspath(os.path.dirname(__file__))
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'a-fallback-secret-key-for-development')
@@ -32,7 +32,6 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['MAX_CONTENT_LENGTH'] = 256 * 1024 * 1024 
 
 db = SQLAlchemy(app)
-# XÓA: migrate = Migrate(app, db)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -64,7 +63,7 @@ class User(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     password_hash = db.Column(db.String(128), nullable=False)
-    registration_date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc)) # Dùng lambda và UTC
+    registration_date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc)) 
     is_online = db.Column(db.Boolean, default=False)
     is_admin = db.Column(db.Boolean, default=False)
 
@@ -88,7 +87,7 @@ class Message(db.Model):
     sender_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     recipient_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     content = db.Column(db.String(1024), nullable=False)
-    timestamp = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc)) # Dùng lambda và UTC
+    timestamp = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     is_read = db.Column(db.Boolean, default=False)
 
     sender = db.relationship('User', foreign_keys=[sender_id], backref='sent_messages')
@@ -110,7 +109,7 @@ class ActivityLog(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     action = db.Column(db.String(100), nullable=False)
     details = db.Column(db.String(500), nullable=True)
-    timestamp = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc)) # Dùng lambda và UTC
+    timestamp = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     target_user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
 
 # --- LOGIN MANAGER & DECORATORS ---
@@ -145,7 +144,7 @@ def admin_required(f):
 def create_db_and_admin_command():
     """⚠️ XÓA TOÀN BỘ DỮ LIỆU và tạo lại database, sau đó tạo tài khoản Admin."""
     
-    # 1. XÓA TẤT CẢ CÁC BẢNG (DROP ALL) - Bắt buộc để xóa schema cũ
+    # 1. XÓA TẤT CẢ CÁC BẢNG (DROP ALL)
     print("⚠️ Đang xóa tất cả các bảng (TẤT CẢ DỮ LIỆU SẼ BỊ MẤT)...")
     try:
         db.drop_all()
